@@ -1,0 +1,13 @@
+{
+  "name": "verikit",
+  "owner": {
+    "name": "eliasTuma"
+  },
+  "plugins": [
+    {
+      "name": "verikit",
+      "source": "./plugin",
+      "description": "Machine-checked promises beside your tests: survey a repo for the promises worth verifying, check each with a TLA+ model and/or property tests in your own test projects, prove every check can fail, and keep it in sync with the code."
+    }
+  ]
+}

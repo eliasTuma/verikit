@@ -1,0 +1,20 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "search-latest-wins"
+rule = "The results shown always belong to the latest query."
+harm = "The user acts on results for something they no longer searched for."
+level = "code"
+tool = "fast-check scheduler on the real RxJS pipeline (Vitest); Angular wiring not exercised"
+tags = ["frontend"]
+run = "npx vitest run -t verification"
+covers = ["src/search.store.js"]
+bounds = "300 runs; 1-4 queries typed in order, responses arriving in any order; sampling"
+assumes = ["The Angular service only forwards HttpClient calls to this store."]
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: mergeMap instead of switchMap (old responses can land last)"
+  patch = "verification/search/mutants/merge-map.patch"
+  match = 'stale results shown'

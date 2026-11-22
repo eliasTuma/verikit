@@ -1,0 +1,39 @@
+# verikit for Azure Pipelines (NOT exercised by the kit yet - adjust before relying on it).
+# Results are published as JUnit, so they appear in the run's Tests tab next to your tests.
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: [main]
+
+pool:
+  vmImage: windows-latest   # needed for .NET Framework (net4x) tests; ubuntu-latest otherwise
+
+steps:
+  - checkout: self
+    fetchDepth: 0            # stale/--changed need history back to the sync commits
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.12"
+  - task: UseDotNet@2
+    inputs:
+      packageType: sdk
+      version: 8.0.x
+  - task: NodeTool@0
+    inputs:
+      versionSpec: 22.x
+  # TLA+ checks need Java 11+. Microsoft-hosted images ship a JDK; if `java` is not on PATH,
+  # set VERIKIT_JAVA to its java.exe, e.g. $(JAVA_HOME_21_X64)\bin\java.exe
+  # - script: npm ci
+  #   workingDirectory: web
+  - script: python verification/verikit.py run --junit $(Common.TestResultsDirectory)/verify-results.xml
+    displayName: verikit run
+  - script: python verification/verikit.py stale
+    displayName: verikit stale
+  - task: PublishTestResults@2
+    condition: always()
+    inputs:
+      testResultsFormat: JUnit
+      testResultsFiles: $(Common.TestResultsDirectory)/verify-results.xml
+      testRunTitle: verikit

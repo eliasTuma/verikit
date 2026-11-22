@@ -1,0 +1,7 @@
+--- a/src/Checkout/CheckoutSession.cs
++++ b/src/Checkout/CheckoutSession.cs
+@@ -80,3 +80,3 @@
+         // One key per purchase, reused by every retry, so the provider charges at most once.
+-        private string IdempotencyKey() => "order-" + _orderId;
++        private string IdempotencyKey() => "order-" + _orderId + "-attempt-" + _attempt;
+     }

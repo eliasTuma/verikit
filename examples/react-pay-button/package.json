@@ -1,0 +1,19 @@
+{
+  "name": "react-pay-button",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.1.0",
+    "fast-check": "^4.3.0",
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}

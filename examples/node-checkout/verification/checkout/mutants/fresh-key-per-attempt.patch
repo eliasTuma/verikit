@@ -1,0 +1,11 @@
+diff --git a/src/checkout.js b/src/checkout.js
+index e3a691d..e9926ee 100644
+--- a/src/checkout.js
++++ b/src/checkout.js
+@@ -7,5 +7,4 @@
+ export async function payForOrder(order, { gateway, timer, maxRetries = 2, timeoutMs = 5000 }) {
+-  // One key per purchase, reused by every retry, so the provider charges at most once.
+-  const idempotencyKey = `order-${order.id}`;
+   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
++    const idempotencyKey = `order-${order.id}-attempt-${attempt}`;
+     const reply = gateway.charge({ customer: order.customer, amount: order.amount, idempotencyKey });

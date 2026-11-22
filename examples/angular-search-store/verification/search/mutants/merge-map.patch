@@ -1,0 +1,11 @@
+--- a/src/search.store.js
++++ b/src/search.store.js
+@@ -1,2 +1,2 @@
+-import { Subject, map, switchMap } from 'rxjs';
++import { Subject, map, mergeMap } from 'rxjs';
+ 
+@@ -13,3 +13,3 @@
+       // switchMap cancels the previous request, so a slow old response can never land last.
+-      switchMap((query) => http.get(query).pipe(map((items) => ({ query, items })))),
++      mergeMap((query) => http.get(query).pipe(map((items) => ({ query, items })))),
+     )

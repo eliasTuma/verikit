@@ -1,0 +1,51 @@
+# verikit for GitHub Actions. On pull requests it runs only the checks whose covered code
+# changed; on main it runs everything. Results are JUnit XML, like your other test reports.
+# Keep the setup steps your checks need and delete the rest.
+name: verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    # windows-latest if any check runs .NET Framework (net4x) tests; ubuntu-latest otherwise
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # stale/--changed need history back to the sync commits
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4  # TLA+ checks
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v4       # verikit downloads a pinned, checksummed tla2tools.jar once
+        with:
+          path: ~/.cache/verikit
+          key: verikit-tla-1.7.4
+      - uses: actions/setup-dotnet@v4  # .NET checks
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-node@v4    # Node / React / Angular checks
+        with:
+          node-version: 22
+      # - run: npm ci                  # install each JS project a check runs in
+      #   working-directory: web
+      - name: verikit run
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python verification/verikit.py run --changed "origin/${{ github.base_ref }}" --junit verify-results.xml
+          else
+            python verification/verikit.py run --junit verify-results.xml
+          fi
+      - name: verikit stale
+        run: python verification/verikit.py stale   # add --strict to fail the build on drift
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-results
+          path: verify-results.xml

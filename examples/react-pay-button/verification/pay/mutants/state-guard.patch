@@ -1,0 +1,7 @@
+--- a/src/PayButton.jsx
++++ b/src/PayButton.jsx
+@@ -12,3 +12,3 @@
+     // A ref, not state: two clicks in the same tick both see the old state before React re-renders.
+-    if (inFlight.current) return;
++    if (status === 'paying' || status === 'paid') return; // state guard: misses same-tick clicks
+     inFlight.current = true;

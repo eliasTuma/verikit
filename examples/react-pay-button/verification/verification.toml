@@ -1,0 +1,20 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "pay-once-ui"
+rule = "One click or many, the order is paid at most once."
+harm = "A double click charges the customer twice."
+level = "code"
+tool = "fast-check scheduler + Testing Library on the real PayButton (Vitest, jsdom)"
+tags = ["payments", "frontend"]
+run = "npx vitest run -t verification"
+covers = ["src/PayButton.jsx"]
+bounds = "200 runs; 1-4 bursts of 1-2 same-tick clicks interleaved with server replies; sampling"
+assumes = ["api.pay is the only way the component starts a payment."]
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: guard on React state instead of a ref (misses two clicks in one tick)"
+  patch = "verification/pay/mutants/state-guard.patch"
+  match = 'order paid [2-9] times'

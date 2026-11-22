@@ -1,0 +1,46 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "checkout-design"
+rule = "A customer is never charged twice for one purchase."
+harm = "The customer pays twice for one order: refunds, chargebacks, lost trust."
+level = "design"
+tool = "TLA+ / TLC"
+tags = ["payments"]
+run = "{verikit} tlc verification/checkout/Checkout.tla"
+covers = ["src/checkout.js"]
+bounds = "1 order, up to 3 charge requests (maxRetries = 2); requests and replies delivered late and in any order"
+assumes = [
+  "The payment provider charges at most once per idempotency key, atomically.",
+  "Declined cards and provider errors are out of scope (no action models them).",
+]
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: every retry sends a different idempotency key"
+  run = "{verikit} tlc verification/checkout/Checkout.tla --const ReuseKey=FALSE"
+  match = 'VIOLATION\] NeverChargedTwice'
+
+  [[check.must_fail]]
+  why = "Reachability witness: the model can actually charge the card"
+  run = "{verikit} tlc verification/checkout/Checkout.tla --inv NeverCharged"
+  match = 'VIOLATION\] NeverCharged\b'
+
+[[check]]
+id = "checkout-code"
+rule = "A customer is never charged twice for one purchase."
+harm = "The customer pays twice for one order: refunds, chargebacks, lost trust."
+level = "code"
+tool = "fast-check scheduler on the real payForOrder()"
+tags = ["payments"]
+run = "node --test test/checkout.race.test.js"
+covers = ["src/checkout.js"]
+bounds = "400 random schedules per run, maxRetries 0..3; sampling, not exhaustive"
+assumes = ["The fake provider deduplicates by idempotency key, as real providers document."]
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: the idempotency key is created inside the retry loop"
+  patch = "verification/checkout/mutants/fresh-key-per-attempt.patch"
+  match = 'customer charged [2-9] times'
