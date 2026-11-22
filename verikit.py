@@ -1022,6 +1022,7 @@ ROUTES = {
     "Node backend": ("fast-check (fc.scheduler for retries/races) on the real handlers",
                      "node --test  /  npx vitest run -t verification"),
 }
+ROUTES["JavaScript/Node"] = ROUTES["TypeScript"] = ROUTES["Node backend"]
 
 
 def cmd_doctor(args) -> int:
@@ -1069,7 +1070,9 @@ def cmd_doctor(args) -> int:
             print(f"  {k} code\n      -> {tools}\n      run as: {cmd}")
     other = sorted(k for k in kinds if k not in ROUTES)
     if other:
-        print(f"  {', '.join(other)}: see plugin/skills/verify-create/routing.md")
+        print(f"  {', '.join(other)}: see .claude/skills/verify-create/routing.md (kit: plugin/skills/...)")
+    if kinds & set(ROUTES):
+        print("  stack notes: .claude/skills/verify-create/stacks/ (dotnet.md, node.md, react.md, angular.md)")
     print("\ntools on this machine:")
     for exe, use in (("git", "required"), ("python", "verikit itself"), ("java", "TLA+ TLC"),
                      ("docker", "TLA+ TLC in a container"), ("dotnet", ".NET tests"), ("node", "JS/TS tests")):
