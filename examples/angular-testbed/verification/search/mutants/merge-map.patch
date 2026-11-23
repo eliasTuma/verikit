@@ -1,0 +1,22 @@
+diff --git a/src/app/search.service.ts b/src/app/search.service.ts
+index 9307fa1..9bcb69e 100644
+--- a/src/app/search.service.ts
++++ b/src/app/search.service.ts
+@@ -1,7 +1,7 @@
+ import { HttpClient } from '@angular/common/http';
+ import { Injectable, inject, signal } from '@angular/core';
+ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+-import { Subject, map, switchMap } from 'rxjs';
++import { Subject, map, mergeMap } from 'rxjs';
+ 
+ export interface SearchResults {
+   query: string;
+@@ -23,7 +23,7 @@ export class SearchService {
+       .pipe(
+         // switchMap cancels the request for the previous query, so a slow old response can
+         // never land after - and overwrite - the results of a newer query.
+-        switchMap((query) =>
++        mergeMap((query) =>
+           this.http
+             .get<string[]>('/api/search', { params: { q: query } })
+             .pipe(map((items) => ({ query, items }))),

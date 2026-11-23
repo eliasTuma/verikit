@@ -1,0 +1,25 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "search-latest-wins"
+rule = "The search results shown always belong to the latest query."
+harm = "The user reads, and acts on, results for something they no longer searched for."
+level = "code"
+tool = "fast-check scheduler + TestBed + HttpTestingController on the real component and service, run by ng test (Karma + Jasmine, headless Chrome)"
+tags = ["frontend"]
+run = 'npx ng test --watch=false --no-progress --browsers=ChromeHeadlessCI --include=src/app/search.verification.spec.ts'
+covers = ["src/app/search.service.ts", "src/app/search.component.ts"]
+harness = ["src/app/search.verification.spec.ts", "karma.conf.js"]
+bounds = "200 runs; 1-4 queries from {a, ab, abc, b} typed in order, each reply arriving at any point after its request; checked on the DOM after every reply that reaches the app and once all replies are in; sampling, not exhaustive"
+assumes = [
+  "HttpTestingController stands in for the network: a request the app unsubscribes from is aborted, so its reply never reaches the app.",
+  "Nothing sits between the input and HttpClient that changes timing (no debounce, retry or cache in this code).",
+  "Every request succeeds; error replies are not exercised.",
+]
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: mergeMap instead of switchMap (the old request stays alive, so its reply can land after a newer query)"
+  patch = "verification/search/mutants/merge-map.patch"
+  match = 'stale results shown'
