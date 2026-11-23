@@ -1,0 +1,13 @@
+diff --git a/src/GiftCards/GiftCardService.cs b/src/GiftCards/GiftCardService.cs
+index 6d570a1..b88c1ec 100644
+--- a/src/GiftCards/GiftCardService.cs
++++ b/src/GiftCards/GiftCardService.cs
+@@ -63,8 +63,6 @@ namespace GiftCards
+                 var card = await _cards.FindAsync(code).ConfigureAwait(false);
+                 if (card == null)
+                     return RedeemResult.NotFound;
+-                if (card.RedeemedByOrder != null)
+-                    return RedeemResult.AlreadyRedeemed;
+ 
+                 await _cards.SaveAsync(card.RedeemedBy(orderId)).ConfigureAwait(false);
+                 await _ledger.CreditAsync(orderId, card.BalanceCents, "gift card " + code).ConfigureAwait(false);

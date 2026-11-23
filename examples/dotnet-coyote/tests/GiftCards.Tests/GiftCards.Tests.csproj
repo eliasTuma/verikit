@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!-- Coyote's TestingEngine; keep the same version as the coyote tool in .config/dotnet-tools.json -->
+    <PackageReference Include="Microsoft.Coyote.Test" Version="1.7.11" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\GiftCards\GiftCards.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="rewrite.coyote.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    Coyote controls Task/async scheduling only in rewritten assemblies. After every build, rewrite
+    the product dll and this test dll IN THE OUTPUT FOLDER (bin/ only; sources are untouched), so
+    `dotnet test`, the IDE and CI all run the rewritten code. The rest of this project's tests run
+    unchanged on the rewritten dlls (outside a TestingEngine, Coyote's hooks pass straight through).
+    Only for .NET (Core) targets: the dotnet tool must not rewrite net4x output (it breaks test
+    discovery there; .NET Framework needs the net462 coyote.exe from Microsoft.Coyote.Tool).
+  -->
+  <Target Name="CoyoteRewrite" AfterTargets="Build" Condition="'$(TargetFrameworkIdentifier)' == '.NETCoreApp'">
+    <Exec Command="dotnet tool restore" WorkingDirectory="$(MSBuildProjectDirectory)" StandardOutputImportance="low" />
+    <Exec Command="dotnet tool run coyote rewrite &quot;$(TargetDir)rewrite.coyote.json&quot;"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          EnvironmentVariables="COYOTE_CLI_TELEMETRY_OPTOUT=1" />
+  </Target>
+</Project>

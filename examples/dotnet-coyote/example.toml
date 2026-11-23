@@ -1,0 +1,5 @@
+# How scripts/check_examples.py runs this example.
+# Restores the pinned coyote CLI (.config/dotnet-tools.json); the test project's build also
+# runs `dotnet tool restore`, this only keeps the download out of the timed run.
+setup = "dotnet tool restore"
+needs = ["dotnet"]

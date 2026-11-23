@@ -1,0 +1,20 @@
+diff --git a/src/GiftCards/GiftCardService.cs b/src/GiftCards/GiftCardService.cs
+index 6d570a1..f320fe1 100644
+--- a/src/GiftCards/GiftCardService.cs
++++ b/src/GiftCards/GiftCardService.cs
+@@ -57,7 +57,6 @@ namespace GiftCards
+ 
+         public async Task<RedeemResult> RedeemAsync(string code, string orderId)
+         {
+-            await _redeemGate.WaitAsync().ConfigureAwait(false);
+             try
+             {
+                 var card = await _cards.FindAsync(code).ConfigureAwait(false);
+@@ -72,7 +71,6 @@ namespace GiftCards
+             }
+             finally
+             {
+-                _redeemGate.Release();
+             }
+         }
+     }
