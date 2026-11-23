@@ -1,0 +1,2 @@
+# How scripts/check_examples.py runs this example.
+needs = ["dotnet"]

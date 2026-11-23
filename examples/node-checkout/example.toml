@@ -1,0 +1,3 @@
+# How scripts/check_examples.py runs this example.
+setup = "npm install --no-audit --no-fund --silent"
+needs = ["node", "npm"]

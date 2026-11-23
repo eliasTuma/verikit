@@ -3,6 +3,11 @@
     python scripts/check_examples.py                 # all examples
     python scripts/check_examples.py dotnet-checkout # one example
 
+Each example says how to run it in examples/<name>/example.toml:
+    setup = "npm ci"            # optional; {python} = this Python
+    needs = ["node", "npm"]     # executables that must be on PATH, else SKIPPED
+    os = ["windows"]            # optional; SKIPPED on other systems
+
 For each example: copy to a SHORT temp path (.NET Framework test discovery fails silently
 near the 260-character path limit), git init + commit, install dependencies, `verikit init`,
 then `verikit run`. Passes only if every check holds, every broken variant is caught, and the
@@ -17,16 +22,22 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
 EXAMPLES = KIT / "examples"
-NEEDS = {  # example -> (setup command or None, executables it needs)
-    "node-checkout": ("npm install --no-audit --no-fund --silent", ["node", "npm"]),
-    "react-pay-button": ("npm install --no-audit --no-fund --silent", ["node", "npm"]),
-    "angular-search-store": ("npm install --no-audit --no-fund --silent", ["node", "npm"]),
-    "dotnet-checkout": (None, ["dotnet"]),
-}
+
+
+def spec(name: str) -> dict:
+    path = EXAMPLES / name / "example.toml"
+    if not path.is_file():
+        sys.exit(f"{name}: no examples/{name}/example.toml")
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def all_examples() -> list[str]:
+    return sorted(p.parent.name for p in EXAMPLES.glob("*/example.toml"))
 
 
 def rmtree(path) -> None:
@@ -58,7 +69,11 @@ def short_tmp() -> Path:
 
 
 def check(name: str) -> tuple[str, str]:
-    setup, exes = NEEDS[name]
+    sp = spec(name)
+    setup, exes = sp.get("setup"), sp.get("needs", [])
+    here = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")
+    if sp.get("os") and here not in sp["os"]:
+        return "SKIPPED", f"runs on {', '.join(sp['os'])} only"
     missing = [e for e in exes if not shutil.which(e)]
     if missing:
         return "SKIPPED", f"missing {', '.join(missing)}"
@@ -73,7 +88,7 @@ def check(name: str) -> tuple[str, str]:
         sh(["git", "add", "-A"], repo)
         sh(["git", "commit", "-qm", "example"], repo)
         if setup:
-            code, out = sh(setup, repo)
+            code, out = sh(setup.replace("{python}", f'"{sys.executable}"'), repo)
             if code:
                 return "FAILED", f"setup failed: {out[-400:]}"
         code, out = sh([sys.executable, str(KIT / "verikit.py"), "init", "--no-skills"], repo)
@@ -97,7 +112,7 @@ def check(name: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    names = sys.argv[1:] or sorted(NEEDS)
+    names = sys.argv[1:] or all_examples()
     rows = [(n, *check(n)) for n in names]
     print("\n" + "\n".join(f"{status:8} {name:22} {detail}" for name, status, detail in rows))
     return 1 if any(status == "FAILED" for _, status, _ in rows) else 0
