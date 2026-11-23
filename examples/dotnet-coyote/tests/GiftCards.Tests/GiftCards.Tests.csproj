@@ -23,8 +23,10 @@
     the product dll and this test dll IN THE OUTPUT FOLDER (bin/ only; sources are untouched), so
     `dotnet test`, the IDE and CI all run the rewritten code. The rest of this project's tests run
     unchanged on the rewritten dlls (outside a TestingEngine, Coyote's hooks pass straight through).
+    Only for .NET (Core) targets: the dotnet tool must not rewrite net4x output (it breaks test
+    discovery there; .NET Framework needs the net462 coyote.exe from Microsoft.Coyote.Tool).
   -->
-  <Target Name="CoyoteRewrite" AfterTargets="Build">
+  <Target Name="CoyoteRewrite" AfterTargets="Build" Condition="'$(TargetFrameworkIdentifier)' == '.NETCoreApp'">
     <Exec Command="dotnet tool restore" WorkingDirectory="$(MSBuildProjectDirectory)" StandardOutputImportance="low" />
     <Exec Command="dotnet tool run coyote rewrite &quot;$(TargetDir)rewrite.coyote.json&quot;"
           WorkingDirectory="$(MSBuildProjectDirectory)"

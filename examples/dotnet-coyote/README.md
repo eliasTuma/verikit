@@ -78,12 +78,18 @@ seed explores the same schedules.
   scheduler and picks which pending continuation runs at every `await`, `Task.Run`,
   `SemaphoreSlim` call, and lock or collection access. The code under test is the unmodified
   production method.
-- **A stress test** (`Task.WhenAll` in a loop, no Coyote) also hits this race, but only by timing
-  luck, and a pass tells you nothing. Measured on this machine against the semaphore-free variant:
-  2484/5000 runs redeemed twice with these fakes. When the fake store completes synchronously
-  (no `await Task.Yield()`), only 305/5000 runs did. Coyote found the bug on schedule 1-4 in each
-  of 200 seeds with these fakes, and on schedule 1-3 with the synchronous fakes. A failure replays
-  from its seed or `.trace` file, and a pass means 1000 controlled schedules ran.
+- **A stress test** also hits this race, but only by timing luck, and a pass tells you nothing.
+  The stress test here was a `Task.WhenAll` loop on the real thread pool, outside the
+  `TestingEngine`, using the same rewritten dlls. Outside a test, Coyote's hooks pass straight
+  through. Measured on this machine against the semaphore-free variant:
+  - **With these fakes:** the stress loop redeemed twice in 2484 of 5000 runs. Coyote found the bug
+    on schedule 1-4 in each of 200 seeds.
+  - **With synchronous fakes** (no `await Task.Yield()`): the stress loop redeemed twice in only
+    305 of 5000 runs. Coyote found the bug on schedule 1-3 in each of 10 seeds. It also switches
+    at lock and collection accesses.
+
+  A Coyote failure replays from its seed or `.trace` file, and a pass means 1000 controlled
+  schedules ran.
 
 Measured on Windows 11 with the .NET 8.0.403 SDK:
 
@@ -101,19 +107,23 @@ cost little.
 ## Limits
 
 - **Sampling, not proof.** Coyote explores schedules at its scheduling points, seeded and at
-  random. It is not an exhaustive search of every interleaving.
+  random. It is not an exhaustive search of every interleaving. Its report says "1000 unique"
+  paths, but that counts sequences of scheduling decisions, not distinct behaviours. Coyote's
+  exhaustive DFS strategy is internal in 1.7.11.
 - **One process.** Two service instances do not share the semaphore. Check that with a TLA+ model
   with an instance count, or with a database-level guard (conditional update, unique constraint)
   and an integration test.
 - **.NET versions.** Coyote 1.7.11 (March 2024) ships `net8.0`, `net6.0`, `netcoreapp3.1` and
   `netstandard2.0` libraries, and a `coyote` dotnet tool for .NET Core / .NET 8. This example
   targets `net8.0` only.
-  - **`net48`, tried once by hand on Windows, not part of this example:** the same test project,
-    multi-targeted `net8.0;net48`, works if the `net48` output is rewritten with the net462
-    `coyote.exe` from the `Microsoft.Coyote.Tool` 1.7.11 package (fetched with a
-    `<PackageDownload>`). The check passed, and the semaphore-free variant failed with the same
-    message. If the dotnet tool rewrites the `net48` dlls instead, `dotnet test` says "No test is
-    available".
+  - **`net48`, tried once by hand on Windows, not part of this example:** the steps were to
+    multi-target the test project `net8.0;net48`, build `net48` with the rewrite target skipped,
+    rewrite `bin/Debug/net48` with the net462 `coyote.exe` from the `Microsoft.Coyote.Tool` 1.7.11
+    package (fetched with a `<PackageDownload>`), then run `dotnet test -f net48 --no-build`. The
+    check passed, and the semaphore-free variant failed with the same message. If the dotnet tool
+    rewrites the `net48` dlls instead, test discovery breaks for the whole `net48` project ("No
+    test is available"). That is why the rewrite target here only runs for .NET (Core) target
+    frameworks.
   - **`net10.0`:** the CLI is a .NET 8 process. The Coyote repository's own compatibility
     assessment says `net10.0` test assemblies need a workaround and are not fully supported in
     1.7.11.
