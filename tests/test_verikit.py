@@ -250,18 +250,55 @@ class RunAndPatches(unittest.TestCase):
         app = self.r.root / "src" / "app.txt"
         original = app.read_bytes()
         with self.assertRaises(KeyboardInterrupt):      # killed while the variant is applied
-            with verikit.AppliedPatch(self.r.root, "verification/break.patch"):
+            with verikit.AppliedVariant(self.r.root, {"patch": "verification/break.patch"}):
                 self.assertIn(b"BROKEN", app.read_bytes())
                 raise KeyboardInterrupt
         self.assertEqual(app.read_bytes(), original)    # __exit__ ran
         # a hard kill skips __exit__: simulate it, then the next command must restore
-        p = verikit.AppliedPatch(self.r.root, "verification/break.patch").__enter__()
+        p = verikit.AppliedVariant(self.r.root, {"patch": "verification/break.patch"}).__enter__()
         self.assertIn(b"BROKEN", app.read_bytes())
         del p
         code, out = vk("list", "--root", str(self.r.root))
         self.assertEqual(code, 0, out)
         self.assertIn("reverted broken-variant patch", out)
         self.assertEqual(app.read_bytes(), original)
+
+    def use_edit(self, find: str, replace: str = "guard = BROKEN") -> None:
+        manifest = self.r.root / "verification" / "verification.toml"
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+            'patch = "verification/break.patch"',
+            f"edits = [{{ file = \"src/app.txt\", find = '{find}', replace = '{replace}' }}]"), encoding="utf-8")
+
+    def test_find_and_replace_variant_is_caught_and_restored_exactly(self):
+        app = self.r.root / "src" / "app.txt"
+        app.write_bytes(b"# header\r\nguard = on\r\n# footer\r\n")          # CRLF file, as on Windows
+        self.use_edit("guard = on")
+        code, out = vk("run", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.assertIn("[ok]   must fail: guard removed", out)
+        self.assertEqual(app.read_bytes(), b"# header\r\nguard = on\r\n# footer\r\n")
+        self.assertFalse((self.r.root / verikit.STATE_DIR / verikit.PENDING).exists())
+
+    def test_find_that_matches_nothing_or_twice_fails_the_variant(self):
+        app = self.r.root / "src" / "app.txt"
+        self.use_edit("guard = enabled")                                     # the code moved on
+        code, out = vk("run", "--root", str(self.r.root))
+        self.assertEqual(code, 1, out)
+        self.assertIn("`find` text was not found", out)
+        manifest = self.r.root / "verification" / "verification.toml"
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace("guard = enabled", "guard = on"),
+                            encoding="utf-8")
+        app.write_text("guard = on\nguard = on\n", encoding="utf-8")          # ambiguous
+        code, out = vk("run", "--root", str(self.r.root))
+        self.assertEqual(code, 1, out)
+        self.assertIn("found 2 times", out)
+        self.assertEqual(app.read_text(encoding="utf-8"), "guard = on\nguard = on\n")
+
+    def test_edit_without_find_is_rejected_when_the_manifest_loads(self):
+        self.use_edit("")
+        code, out = vk("list", "--root", str(self.r.root))
+        self.assertEqual(code, 2)
+        self.assertIn("each edit needs", out)
 
     def test_tag_filter(self):
         code, out = vk("run", "--root", str(self.r.root), "--tag", "nope")

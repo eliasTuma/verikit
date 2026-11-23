@@ -174,6 +174,14 @@ def load_manifest(root: Path) -> dict:
                 die(f"{label}: `match` is not a valid regex: {e}")
             if mf.get("patch") and not (root / mf["patch"]).is_file():
                 die(f"{label}: patch file {mf['patch']} not found")
+            edits = variant_edits(mf)
+            if edits and mf.get("patch"):
+                die(f"{label}: give a `patch` or `edits`, not both")
+            for e in edits:
+                if not isinstance(e, dict) or not all(isinstance(e.get(k), str) for k in ("file", "find", "replace")) \
+                        or not e["find"]:
+                    die(f"{label}: each edit needs `file`, `find` and `replace` strings, e.g. "
+                        "edits = [{ file = \"src/pay.js\", find = \"if (paid) return;\", replace = \"\" }]")
     data["check"] = checks
     return data
 
@@ -675,22 +683,54 @@ def recover_pending(root: Path) -> None:
     warn(f"reverted broken-variant patch {rec['rel']} left applied by an interrupted run")
 
 
-class AppliedPatch:
-    """Context manager: apply a broken-variant patch, always revert it, and prove it changed code.
-    The touched files are backed up byte for byte first, and the revert restores those bytes."""
+def variant_edits(mf: dict) -> list[dict]:
+    """The find-and-replace edits of a broken variant (`edit = {...}` or `edits = [...]`)."""
+    edits = mf.get("edits") or ([mf["edit"]] if mf.get("edit") else [])
+    return edits if isinstance(edits, list) else [edits]
 
-    def __init__(self, root: Path, rel: str):
-        self.root, self.rel, self.patch = root, rel, (root / rel)
-        self.top, self.args = _patch_args(root, self.patch)
+
+def _apply_edit(path: Path, find: str, replace: str) -> None:
+    """Replace the one occurrence of `find` in `path`. Line endings in the file are kept:
+    the text is matched with LF endings and written back in the file's own style."""
+    raw = read_keep(path)
+    crlf = "\r\n" in raw
+    text = raw.replace("\r\n", "\n")
+    find, replace = find.replace("\r\n", "\n"), replace.replace("\r\n", "\n")
+    count = text.count(find)
+    if count != 1:
+        where = "not found" if count == 0 else f"found {count} times"
+        raise VerikitError(f"edit of {path.name}: the `find` text was {where}; it must match exactly once. "
+                           "The code moved: update `find` to the current text of the guard.", FAILED)
+    text = text.replace(find, replace)
+    write_keep(path, text.replace("\n", "\r\n") if crlf else text)
+
+
+class AppliedVariant:
+    """Context manager: apply a broken variant (a patch file, or find-and-replace edits), prove
+    it changed code, and always put the files back. The touched files are backed up byte for
+    byte first; the revert restores those bytes, also after an interrupted run."""
+
+    def __init__(self, root: Path, mf: dict):
+        self.root = root
+        self.rel = mf.get("patch") or "edits to " + ", ".join(sorted({e["file"] for e in variant_edits(mf)}))
+        self.patch = (root / mf["patch"]) if mf.get("patch") else None
+        self.edits = variant_edits(mf)
+        self.top, self.args = _patch_args(root, self.patch) if self.patch else (root, [])
         self.files: list[Path] = []
         self.saved: list[dict] = []
         self.before: dict[str, str] = {}
 
     def __enter__(self):
-        c, o = git(self.top, "apply", "--check", *self.args)
-        if c != 0:
-            raise VerikitError(f"patch {self.rel} does not apply: {o}", FAILED)
-        self.files = _patched_files(self.root, self.patch)
+        if self.patch:
+            c, o = git(self.top, "apply", "--check", *self.args)
+            if c != 0:
+                raise VerikitError(f"patch {self.rel} does not apply: {o}", FAILED)
+            self.files = _patched_files(self.root, self.patch)
+        else:
+            self.files = sorted({self.root / e["file"] for e in self.edits})
+            missing = [f.name for f in self.files if not f.is_file()]
+            if missing:
+                raise VerikitError(f"edit target not found: {', '.join(missing)}", FAILED)
         self.before = _digest(self.files)
         backups = state_path(self.root, BACKUP_DIR)
         shutil.rmtree(backups, ignore_errors=True)
@@ -703,13 +743,23 @@ class AppliedPatch:
                 (backups / name).write_bytes(f.read_bytes())
             self.saved.append({"path": str(f), "backup": name})
         state_path(self.root, PENDING).write_text(json.dumps(
-            {"patch": str(self.patch.resolve()), "rel": self.rel, "at": time.time(), "files": self.saved}),
-            encoding="utf-8")
-        c, o = git(self.top, "apply", *self.args)
-        if c != 0 or _digest(self.files) == self.before:
+            {"rel": self.rel, "at": time.time(), "files": self.saved}), encoding="utf-8")
+        try:
+            if self.patch:
+                c, o = git(self.top, "apply", *self.args)
+                if c != 0:
+                    raise VerikitError(f"patch {self.rel} does not apply: {o}", FAILED)
+            else:
+                for e in self.edits:
+                    _apply_edit(self.root / e["file"], e["find"], e["replace"])
+        except VerikitError:
             self._revert()
-            raise VerikitError(f"patch {self.rel} applied but changed no file; check its paths "
-                               "(they must be relative to the folder that holds verification/)", FAILED)
+            raise
+        if _digest(self.files) == self.before:
+            self._revert()
+            raise VerikitError(f"{self.rel} changed no file" + ("; check the patch's paths (they must be "
+                               "relative to the folder that holds verification/)" if self.patch else
+                               "; `find` and `replace` are the same text"), FAILED)
         return self
 
     def _revert(self) -> None:
@@ -753,8 +803,8 @@ def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | 
         why = mf.get("why", "broken variant")
         try:
             cmd, _ = with_sources(root, check, mf.get("run", check["run"]))
-            if mf.get("patch"):
-                with AppliedPatch(root, mf["patch"]):
+            if mf.get("patch") or variant_edits(mf):
+                with AppliedVariant(root, mf):
                     code, out, secs = run_shell(cmd, root, timeout, seed, src_env)
             else:
                 code, out, secs = run_shell(cmd, root, timeout, seed, src_env)

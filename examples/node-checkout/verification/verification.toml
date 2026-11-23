@@ -40,6 +40,7 @@ bounds = "400 random schedules per run, maxRetries 0..3; sampling, not exhaustiv
 assumes = ["The fake provider deduplicates by idempotency key, as real providers document."]
 
   [[check.must_fail]]
-  why = "Broken variant: the idempotency key is created inside the retry loop"
-  patch = "verification/checkout/mutants/fresh-key-per-attempt.patch"
+  why = "Broken variant: every attempt sends its own idempotency key"
+  # find-and-replace: survives edits elsewhere in the file, unlike a diff with context lines
+  edits = [{ file = "src/checkout.js", find = 'amount: order.amount, idempotencyKey });', replace = 'amount: order.amount, idempotencyKey: `${idempotencyKey}-attempt-${attempt}` });' }]
   match = 'customer charged [2-9] times'
