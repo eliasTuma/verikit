@@ -741,6 +741,72 @@ class CiMode(unittest.TestCase):
         self.assertEqual(vk("run", "--root", str(self.r.root), "--ci", "--changed")[0], 2)
 
 
+class ReportAndSummary(unittest.TestCase):
+    def setUp(self):
+        self.r = Repo(GOOD)
+        self.r.make_patch()
+        self.root = str(self.r.root)
+        self.summary = self.r.tmp.parent / (self.r.tmp.name + "-summary.md")
+        self.addCleanup(lambda: self.summary.unlink(missing_ok=True))
+
+    def tearDown(self):
+        self.r.close()
+
+    def test_passing_but_unsynced_check_is_never_plain_green(self):
+        code, out = vk("run", "--root", self.root, "--summary", str(self.summary))
+        self.assertEqual(code, 0, out)
+        text = self.summary.read_text(encoding="utf-8")
+        self.assertIn("all 1 checked promises hold; 1 check(s) are not confirmed against the current code", text)
+        self.assertIn("⚠️ holds, but see sync record", text)
+        self.assertNotIn("✅ holds", text)
+        self.assertIn("NEVER CONFIRMED", text)
+        vk("sync", "guard", "--root", self.root)
+        vk("run", "--root", self.root, "--summary", str(self.summary))
+        text = self.summary.read_text(encoding="utf-8")
+        self.assertIn("✅ holds; 1 broken variant(s) caught", text)
+        self.assertNotIn("⚠️", text)
+
+    def test_failure_shows_rule_output_and_replay_command(self):
+        (self.r.root / "src" / "app.txt").write_text("guard = BROKEN\n", encoding="utf-8")
+        code, out = vk("run", "--root", self.root, "--seed", "77", "--summary", str(self.summary))
+        self.assertEqual(code, 1, out)
+        text = self.summary.read_text(encoding="utf-8")
+        self.assertIn("1 of 1 checked promises FAILED", text)
+        self.assertIn("### ❌ `guard`: The guard is always on.", text)
+        self.assertIn("RULE BROKEN: guard missing", text)
+        self.assertIn("run guard --seed 77", text)
+
+    def test_ci_publishes_to_github_and_azure(self):
+        gh = self.r.tmp.parent / (self.r.tmp.name + "-gh-summary.md")
+        self.addCleanup(lambda: gh.unlink(missing_ok=True))
+        with ci_env(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(gh)):
+            self.assertEqual(vk("run", "--root", self.root, "--ci")[0], 0)
+        self.assertIn("## verikit:", gh.read_text(encoding="utf-8"))
+        with ci_env(TF_BUILD="True", BUILD_REASON="IndividualCI"):
+            code, out = vk("run", "--root", self.root, "--ci")
+        self.assertEqual(code, 0, out)
+        line = next(x for x in out.splitlines() if x.startswith("##vso[task.uploadsummary]"))
+        path = Path(line.split("]", 1)[1])
+        self.assertTrue(path.is_absolute() and path.is_file(), line)       # Azure needs an absolute path
+        self.assertIn("## verikit:", path.read_text(encoding="utf-8"))
+
+    def test_report_lists_every_promise_and_flags_drift(self):
+        vk("sync", "guard", "--root", self.root)
+        code, out = vk("report", "--root", self.root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("## The guard is always on.", out)
+        self.assertIn("✅ up to date", out)
+        (self.r.root / "src" / "notes.txt").write_text("drift\n", encoding="utf-8")
+        page = self.r.tmp.parent / (self.r.tmp.name + "-report.html")
+        self.addCleanup(lambda: page.unlink(missing_ok=True))
+        code, out = vk("report", "--root", self.root, "--html", str(page))
+        self.assertEqual(code, 0, out)
+        html = page.read_text(encoding="utf-8")
+        self.assertIn("OUT OF DATE", html)
+        self.assertIn("1 check(s) need attention", html)
+        self.assertNotIn("<td class=ok>", html)
+
+
 class SavedSeeds(unittest.TestCase):
     """A random run that finds a bug prints its seed; `seed add` keeps it, and every later run
     replays it, so the same bug cannot come back unnoticed."""

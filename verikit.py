@@ -972,6 +972,146 @@ def ci_base(root: Path, env=None) -> str | None:
     return base
 
 
+DRIFT_WORDS = {"synced": "up to date", "stale": "OUT OF DATE: covered code changed since the last sync",
+               "never-synced": "NEVER CONFIRMED: no sync record", "unknown": "UNKNOWN: cannot be compared here"}
+
+
+def _cell(text: str) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def summary_markdown(root: Path, all_checks: list[dict], results: list[dict], seed: int) -> str:
+    """What a reviewer needs from one run, as Markdown for the pull request or build page.
+    A check that passes while its sync record is out of date is never shown as plain green."""
+    by_id = {r["id"]: r for r in results}
+    drift = {c["id"]: stale_info(root, c) for c in all_checks}
+    failed = [r for r in results if not r["ok"]]
+    out_of_date = [c for c in all_checks if drift[c["id"]][0] != "synced"]
+    if failed:
+        headline = f"{len(failed)} of {len(results)} checked promises FAILED"
+    elif not results:
+        headline = "no check covers the changed files; nothing was run"
+    else:
+        headline = f"all {len(results)} checked promises hold"
+    if out_of_date:
+        headline += f"; {len(out_of_date)} check(s) are not confirmed against the current code"
+    lines = [f"## verikit: {headline}", "",
+             "| Promise | Check | This run | Sync record |", "|---|---|---|---|"]
+    for c in all_checks:
+        r = by_id.get(c["id"])
+        status, _ = drift[c["id"]]
+        if r is None:
+            ran = "not run (its files did not change)"
+        elif r["ok"]:
+            caught = sum(1 for s in r["steps"] if s["what"].startswith("must fail"))
+            ran = f"✅ holds; {caught} broken variant(s) caught" if status == "synced" else \
+                f"⚠️ holds, but see sync record; {caught} broken variant(s) caught"
+        else:
+            ran = "❌ FAILED: " + "; ".join(s["what"] for s in r["steps"] if not s["ok"])
+        lines.append(f"| {_cell(c['rule'])} | `{c['id']}` ({_cell(c.get('level', '?'))}, {_cell(c.get('tool', '?'))}) "
+                     f"| {_cell(ran)} | {'✅' if status == 'synced' else '⚠️'} {DRIFT_WORDS[status]} |")
+    for r in failed:
+        c = next(x for x in all_checks if x["id"] == r["id"])
+        lines += ["", f"### ❌ `{r['id']}`: {c['rule']}"]
+        if c.get("harm"):
+            lines.append(f"Harm if this ships: {c['harm']}")
+        for s in r["steps"]:
+            if not s["ok"]:
+                lines += ["", f"**{s['what']}** (exit {s.get('exit')})", "", "```",
+                          *[ln.replace("      | ", "", 1) for ln in (s.get("output") or "").splitlines()[-40:]], "```"]
+        lines += ["", f"Replay: `{self_cmd(root)} run {r['id']} --seed {seed}`"]
+    if out_of_date:
+        lines += ["", "### ⚠️ Not confirmed against the current code", ""]
+        for c in out_of_date:
+            status, files = drift[c["id"]]
+            shown = ", ".join(f"`{f}`" for f in files[:6]) + (" ..." if len(files) > 6 else "")
+            lines.append(f"- `{c['id']}`: {DRIFT_WORDS[status]}" + (f" ({shown})" if files else ""))
+        lines += ["", "A check can pass while describing code that no longer exists. Re-read the changes against "
+                      f"the model (verify-maintain), then `{self_cmd(root)} sync <id>`."]
+    lines += ["", f"<sub>verikit {VERSION}, seed {seed}</sub>", ""]
+    return "\n".join(lines)
+
+
+def publish_summary(root: Path, text: str, path: str | None, ci: bool) -> None:
+    """Write the run summary where people will see it: a file, GitHub's job summary, or the
+    Extensions tab of an Azure Pipelines run."""
+    if path:
+        Path(path).write_text(text, encoding="utf-8")
+    if not ci:
+        return
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    elif os.environ.get("TF_BUILD"):
+        target = Path(path).resolve() if path else (root / "verify-summary.md").resolve()
+        if not path:
+            target.write_text(text, encoding="utf-8")
+        print(f"##vso[task.uploadsummary]{target}")   # Azure logging command: needs an absolute path
+
+
+def cmd_report(args) -> int:
+    """Every promise this repo verifies and where each one stands, without running anything."""
+    root = find_root(args.root)
+    m = load_manifest(root)
+    state = read_state(root)
+    rows = []
+    for c in select(m["check"], [], args.tag):
+        status, files = stale_info(root, c)
+        last = state.get(c["id"], {})
+        fresh = last.get("fingerprint") == fingerprint(root, c)
+        rows.append({"rule": c["rule"], "harm": c.get("harm", ""), "id": c["id"], "level": c.get("level", "?"),
+                     "tool": c.get("tool", "?"), "bounds": c.get("bounds", ""), "variants": len(c["must_fail"]),
+                     "status": status, "changed": files,
+                     "last": f"passed {last['at']}" if fresh and last else "not run on the current content"})
+    rules = list(dict.fromkeys(r["rule"] for r in rows))
+    title = f"Verified promises: {root.name}"
+    attention = sum(1 for r in rows if r["status"] != "synced")
+    intro = (f"{len(rules)} promise(s), {len(rows)} check(s); {attention} check(s) need attention."
+             if attention else f"{len(rules)} promise(s), {len(rows)} check(s); every check is confirmed "
+                               "against the current code.")
+    if args.html:
+        import html
+        esc = html.escape
+        body = [f"<h1>{esc(title)}</h1><p>{esc(intro)}</p>"]
+        for rule in rules:
+            mine = [r for r in rows if r["rule"] == rule]
+            body.append(f"<h2>{esc(rule)}</h2>" + (f"<p class=harm>If it breaks: {esc(mine[0]['harm'])}</p>" if mine[0]["harm"] else ""))
+            body.append("<table><tr><th>Check</th><th>Level and tool</th><th>Scope checked</th>"
+                        "<th>Broken variants</th><th>Sync record</th><th>Last run on this machine</th></tr>")
+            for r in mine:
+                cls = "ok" if r["status"] == "synced" else "warn"
+                body.append(f"<tr><td><code>{esc(r['id'])}</code></td><td>{esc(r['level'])}: {esc(r['tool'])}</td>"
+                            f"<td>{esc(r['bounds'])}</td><td>{r['variants']}</td>"
+                            f"<td class={cls}>{esc(DRIFT_WORDS[r['status']])}</td><td>{esc(r['last'])}</td></tr>")
+            body.append("</table>")
+        page = ("<!doctype html><html lang=en><meta charset=utf-8><title>" + esc(title) + "</title><style>"
+                "body{font:15px/1.5 system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1b1f24}"
+                "table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border:1px solid #d0d7de;"
+                "padding:.4rem .6rem;text-align:left;vertical-align:top}th{background:#f6f8fa}"
+                ".ok{color:#1a7f37}.warn{color:#9a6700;font-weight:600}.harm{color:#57606a}"
+                "</style>" + "".join(body) + f"<p><small>verikit {VERSION}</small></p></html>")
+        Path(args.html).write_text(page, encoding="utf-8")
+        print(f"wrote {args.html}")
+    lines = [f"# {title}", "", intro, ""]
+    for rule in rules:
+        mine = [r for r in rows if r["rule"] == rule]
+        lines += [f"## {rule}", ""] + ([f"If it breaks: {mine[0]['harm']}", ""] if mine[0]["harm"] else [])
+        lines += ["| Check | Level and tool | Scope checked | Broken variants | Sync record | Last run on this machine |",
+                  "|---|---|---|---|---|---|"]
+        for r in mine:
+            mark = "✅" if r["status"] == "synced" else "⚠️"
+            lines.append(f"| `{r['id']}` | {_cell(r['level'])}: {_cell(r['tool'])} | {_cell(r['bounds'])} | "
+                         f"{r['variants']} | {mark} {DRIFT_WORDS[r['status']]} | {r['last']} |")
+        lines.append("")
+    text = "\n".join(lines)
+    if args.md:
+        Path(args.md).write_text(text, encoding="utf-8")
+        print(f"wrote {args.md}")
+    if not args.md and not args.html:
+        print(text)
+    return OK
+
+
 def cmd_run(args) -> int:
     root = find_root(args.root)
     recover_pending(root)
@@ -1007,6 +1147,8 @@ def cmd_run(args) -> int:
         Path(args.json).write_text(json.dumps({"seed": seed, "results": results}, indent=2), encoding="utf-8")
     if args.junit:
         write_junit(args.junit, results, time.time() - t0)
+    if args.summary or args.ci:
+        publish_summary(root, summary_markdown(root, m["check"], results, seed), args.summary, args.ci)
     return FAILED if bad else OK
 
 
@@ -1950,6 +2092,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--json", help="write results as JSON")
     p.add_argument("--junit", help="write results as JUnit XML (for CI test reports)")
+    p.add_argument("--summary", metavar="FILE.md",
+                   help="write a Markdown summary of this run (with --ci it also goes to the GitHub job "
+                        "summary or the Azure run's Extensions tab)")
     p.set_defaults(fn=cmd_run)
 
     p = sub.add_parser("stale", parents=[common], help="checks whose covered code changed since their sync commit")
@@ -1963,6 +2108,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--seed", type=int)
     p.set_defaults(fn=cmd_sync)
+
+    p = sub.add_parser("report", parents=[common], help="every promise and where it stands, without running anything")
+    p.add_argument("--tag", action="append", default=[])
+    p.add_argument("--md", metavar="FILE", help="write Markdown (default: print it)")
+    p.add_argument("--html", metavar="FILE", help="write a self-contained HTML page")
+    p.set_defaults(fn=cmd_report)
 
     p = sub.add_parser("seed", parents=[common], help="keep the seed of a failing case; `run` replays saved seeds")
     p.add_argument("action", choices=["add", "list"])
