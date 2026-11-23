@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.0 - 2026-11-23
+
+New examples, all run through `verikit run` with every broken variant caught:
+- `examples/dotnet-legacy`: a non-SDK .NET Framework 4.8 solution (packages.config, MSTest v2,
+  FsCheck), restored and built with MSBuild and run with vstest.console via `legacy_test.py`.
+- `examples/dotnet-coyote`: Microsoft Coyote 1.7.11 explores real `async` interleavings of a
+  gift-card redemption (net8.0, binary rewriting after build); two broken variants.
+- `examples/angular-testbed`: an Angular 20 workspace, `ng test` with Karma + Jasmine and
+  headless Chrome, TestBed + `HttpTestingController` + fast-check, asserted on the DOM.
+  Replaces the untested `templates/angular/`.
+
+CI, for GitHub Actions and Azure Pipelines:
+- `run --ci`: in a pull-request build (GitHub Actions; Azure Pipelines on Azure Repos or GitHub
+  repos; GitLab) run only the checks whose files changed vs the target branch; otherwise all.
+  A missing or shallow base runs every check, never none.
+- `init --ci github,azure` (or `both`). Running `init --ci` in another monorepo root adds that root
+  to the workflow's `# verikit:roots` list. GitHub: one matrix job per root. Azure: one job runs
+  every root and publishes JUnit to the Tests tab; JDK 21 via `JavaToolInstaller`; tla2tools cache.
+- `scripts/check_ci_templates.py` validates both templates against the official schemas; the
+  kit's CI also runs actionlint.
+
+Runner:
+- Cross-repo drift: `[sources.<name>] path = "../other-repo"` and `name:glob` entries in `covers`
+  and `harness`. `sync` records that repo's commit (`synced_sources`); `stale`, `--changed`, `--ci`
+  and the hook report drift there. A missing checkout is `unknown` (fails `stale --strict`) and
+  does not block the hook on its own. `VERIKIT_SOURCE_<NAME>` overrides the path.
+- Broken-variant patches are reverted by restoring byte-exact backups (also after an
+  interrupted run). Fixes `could not revert` when `core.autocrlf=true` turned LF files into CRLF.
+- Stop hook blocks with Claude Code's JSON `decision`/`reason` (exit 0) instead of exit 2.
+- `doctor`: legacy projects route to MSBuild + vstest (never `dotnet test`, which runs nothing
+  there and exits 0), packages.config is read, vswhere is reported, long paths warned.
+
+Tested: the Stop hook in a live Claude Code session (docs/evidence/live-stop-hook.md); the
+plugin installed from GitHub with `claude plugin marketplace add` + `install` in an isolated
+config. `check_examples.py` now reads `examples/<name>/example.toml`, and an example named on
+the command line that is SKIPPED fails the run.
+
+Docs: MSTest filters on `TestCategory=` (a wrong property passes silently); legacy, Coyote and
+Angular TestBed stack notes; Azure Repos needs a Build validation branch policy for PRs.
+
 ## 0.2.1 - 2026-11-23
 
 Fixes from the first fresh-agent acceptance test (an agent given only AGENTS.md added a

@@ -1,6 +1,6 @@
 {
   "name": "verikit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Skills for machine-checked promises: verify-survey (rank what to verify), verify-create (model + code checks that must be seen to fail), verify-maintain (drift vs bug after code changes). Pair with the verikit runner: python verikit.py init.",
   "author": {
     "name": "eliasTuma"

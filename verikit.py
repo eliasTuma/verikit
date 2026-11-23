@@ -44,7 +44,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"  # official v1.7.4 asset

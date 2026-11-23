@@ -20,7 +20,7 @@ The model describes the design, so the code's language does not matter.
 
 | Stack | Property / concurrency tests | Bounded verifier on the code | Proofs |
 |---|---|---|---|
-| **C# / .NET and .NET Framework** | **FsCheck (ran, net8.0 + net48)**, CsCheck (.NET only); **Microsoft Coyote** for Task interleavings (not run) | - | Dafny (compiles to C#) |
+| **C# / .NET and .NET Framework** | **FsCheck (ran: net8.0, net48, legacy non-SDK net48)**, CsCheck (.NET only); **Microsoft Coyote 1.7.11 for real async/Task interleavings (ran, net8.0)** | - | Dafny (compiles to C#) |
 | **Node / TypeScript** | **fast-check (ran)**, `fc.scheduler()` for async races | - | - |
 | **React** | **fast-check + Testing Library (ran)**; Playwright for full flows (not run) | - | - |
 | **Angular** | **fast-check on RxJS services (ran)**; TestBed wiring (template, not run) | - | - |

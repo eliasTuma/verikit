@@ -14,7 +14,7 @@ broken variants that must make them fail, and drift tracking.
 | legacy (non-SDK) .NET Framework project | MSTest `[TestCategory("Verification")]`, or a trait/category as above | `{python} verification/legacy_test.py <sln> <tests.dll> TestCategory=Verification` (MSBuild + vstest; copy it from `examples/dotnet-legacy`). Use `Category=` for xUnit/NUnit. Never `dotnet test` on the project: it runs nothing and exits 0 |
 | Vitest | `test('verification: ...')` | `npx vitest run -t verification` |
 | Jest | `test('verification: ...')` | `npx jest -t verification` |
-| Karma/Jasmine (Angular) | `*.verification.spec.ts` | `npx ng test --watch=false --include="**/*.verification.spec.ts"` |
+| Karma/Jasmine (Angular) | `src/app/<area>.verification.spec.ts` | `npx ng test --watch=false --no-progress --browsers=ChromeHeadlessCI --include=src/app/<area>.verification.spec.ts` (a headless launcher in `karma.conf.js`; see `examples/angular-testbed`) |
 | node:test | a separate `*.test.js` file | `node --test test/<file>.test.js` |
 
 The manifest's `run` selects only the verification tests, so verikit can run each check, and

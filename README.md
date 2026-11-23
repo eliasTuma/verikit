@@ -12,9 +12,10 @@ purchase"* - and have each one checked against **every ordering in a stated scop
 model of the design) and/or **hundreds of generated orderings of the real code** (property
 tests inside your own test projects), with proof that every check can actually fail.
 
-It is a small Python runner (stdlib only), three agent skills, templates for .NET, Node,
-React and Angular, and CI templates. Version **0.2.1** - an initial public version; see
-[what has been tested](#supported-stacks).
+It is a small Python runner (stdlib only), three agent skills (also installable as a Claude
+Code plugin), seven runnable examples for .NET (including legacy .NET Framework and Coyote),
+Node, React and Angular, and CI templates for GitHub Actions and Azure Pipelines. Version
+**0.3.0**; see [what has been tested](#supported-stacks).
 
 ---
 
@@ -55,20 +56,21 @@ Details: [docs/methodology.md](docs/methodology.md) · [docs/combining-with-test
 |---|---|---|---|
 | **.NET** (net8.0) | yes | xUnit + FsCheck generated event orderings | **ran** - [examples/dotnet-checkout](examples/dotnet-checkout) |
 | **.NET Framework** (net48, SDK-style project) | yes | same test, multi-targeted `net8.0;net48` | **ran on Windows** |
-| .NET Framework, legacy (non-SDK) projects | yes | same, run via `vstest.console.exe` | template, not run |
-| .NET async/Task races (Microsoft Coyote) | - | systematic interleaving tests | pointer only, not run |
+| **.NET Framework, legacy (non-SDK) projects** (packages.config, MSTest v2) | yes | FsCheck; MSBuild build + `vstest.console` via `legacy_test.py` | **ran on Windows** - [examples/dotnet-legacy](examples/dotnet-legacy) |
+| **.NET async/Task races** (Microsoft Coyote 1.7.11, net8.0) | - | systematic exploration of real `async` interleavings | **ran** - [examples/dotnet-coyote](examples/dotnet-coyote) |
 | **Node backend** | yes | fast-check `fc.scheduler()` on real handlers | **ran** - [examples/node-checkout](examples/node-checkout) |
 | **React** | yes | fast-check + Testing Library (Vitest) | **ran** - [examples/react-pay-button](examples/react-pay-button) |
 | **Angular** - RxJS services/stores | yes | fast-check (Vitest) | **ran** - [examples/angular-search-store](examples/angular-search-store) |
-| Angular - TestBed / Karma / Jest wiring | yes | [templates/angular](templates/angular) | template, not run |
+| **Angular** - TestBed through `ng test` (Karma + Jasmine, headless Chrome) | yes | fast-check + `HttpTestingController`, asserted on the DOM | **ran** - [examples/angular-testbed](examples/angular-testbed); Jest and the Angular 21 Vitest runner tried by hand only |
 | Python, Rust, Go, Java, C/C++ | yes | see [routing](plugin/skills/verify-create/routing.md) | pointers only, not run |
-| CI: GitHub Actions | | [templates/ci/github-actions.yml](templates/ci/github-actions.yml) | the kit's own CI uses the same steps |
-| CI: Azure Pipelines | | [templates/ci/azure-pipelines.yml](templates/ci/azure-pipelines.yml) | template, not run |
-| Agents: Claude Code (skills + Stop hook) | | | hook tested by feeding hook JSON; skills tested by a fresh agent |
+| **CI: GitHub Actions** | | [templates/ci/github-actions.yml](templates/ci/github-actions.yml), one job per root | schema + actionlint valid; its `run --ci` path runs in the e2e test |
+| CI: Azure Pipelines | | [templates/ci/azure-pipelines.yml](templates/ci/azure-pipelines.yml), JUnit to the Tests tab | schema-valid; `run --ci` with Azure's PR variables runs in the e2e test; **not yet run in an Azure DevOps project** |
+| **Agents: Claude Code** (skills, plugin, Stop hook) | | | hook: [recorded live session](docs/evidence/live-stop-hook.md); plugin: installed from GitHub with `claude plugin`; skills: used by a fresh agent |
 | Agents: Cursor, Codex, others | | read [AGENTS.md](AGENTS.md) and the skill files directly | not tested |
 
-"Ran" means: executed on Windows 11 with the stated versions, through `verikit run`, with
-every broken variant caught (`python scripts/check_examples.py`).
+"Ran" means: executed through `verikit run` with the stated versions, every broken variant
+caught (`python scripts/check_examples.py`), on Windows 11 and in the kit's CI (Linux for the
+JS and net8.0 examples, Windows for .NET Framework).
 
 ## Quick start
 
@@ -82,8 +84,9 @@ git clone https://github.com/eliasTuma/verikit
 # 2. install into a repo: in the folder that should own the checks
 #    (the repo root, or one service folder in a monorepo)
 cd path/to/your-repo
-python path/to/verikit/verikit.py init --hook --ci github     # or --ci azure
+python path/to/verikit/verikit.py init --hook --ci both       # or --ci github / --ci azure
 python verification/verikit.py doctor                         # projects, stacks, test frameworks, tools
+#    monorepo: run init again in each service folder; it adds that root to the CI workflow
 
 # 3. in Claude Code
 /verify-survey                    # ranks the promises worth verifying -> verification/PLAN.md
@@ -97,9 +100,17 @@ python verification/verikit.py stale                  # drift since each sync co
 
 `init` writes `verification/verification.toml`, a vendored `verification/verikit.py`
 (commit both), the skills into `.claude/skills/`, the Stop hook into `.claude/settings.json`,
-and a CI workflow. Re-running `init` upgrades the vendored runner and leaves everything else alone.
+and the CI workflow(s). Re-running `init` upgrades the vendored runner and leaves everything else alone.
 
-To try it first on known code: `python scripts/check_examples.py` runs all four examples.
+**Skills as a Claude Code plugin instead** (one install per machine, all repos):
+`/plugin marketplace add eliasTuma/verikit`, then `/plugin install verikit@verikit`; run `init`
+with `--no-skills` so the skills are not listed twice.
+
+**Azure Repos:** the YAML `pr:` trigger does not apply there; add the pipeline as a *Build
+validation* branch policy so pull requests run it.
+
+To try it first on known code: `python scripts/check_examples.py` runs every example your
+machine has the tools for.
 
 ## For agents: read this before cloning
 
@@ -111,8 +122,8 @@ To try it first on known code: `python scripts/check_examples.py` runs all four 
   counterexample instead. Do not change product code while creating or maintaining checks
   unless the user asks. Every `must_fail` needs a `match`. Never set `synced_commit` by hand.
 - **`verikit run` temporarily edits product files** to apply broken-variant patches, then
-  reverts them. It records each applied patch in `.verikit/` and reverts leftovers on the next
-  start, but do not run it on a working tree with unrelated uncommitted edits to the same files.
+  restores them byte for byte from backups in `.verikit/` (also on the next start, if a run was
+  interrupted). Still, do not run it on a working tree with unrelated uncommitted edits to the same files.
 - **Manifest commands are executed as shell commands.** Review `verification/` changes like
   code; never run verikit on an untrusted repo's manifest.
 - **Windows + .NET Framework:** keep paths short (under ~200 characters). Test discovery
@@ -127,14 +138,14 @@ To try it first on known code: `python scripts/check_examples.py` runs all four 
 | Command | What it does | Exit |
 |---|---|---|
 | `doctor [--depth N]` | Lists every project (.NET Framework vs .NET, legacy project format, React, Angular, Node backend...), its test frameworks, the tools installed, and what fits. | 0 |
-| `init [--hook] [--ci github\|azure] [--no-skills] [--force]` | Scaffolds `verification/` in the current folder (monorepo-aware). | 0 / 2 |
-| `run [ID...] [--tag T] [--changed [REF]] [--junit F] [--json F] [--seed N]` | Each check must pass; each `must_fail` must fail with its `match`. `--changed REF` = only checks whose covered files changed vs `REF...HEAD` (PRs); bare `--changed` = vs each sync commit. The seed is exported as `VERIKIT_SEED`. | 0 / 1 / 2 |
+| `init [--hook] [--ci github,azure\|both] [--no-skills] [--force]` | Scaffolds `verification/` in the current folder (monorepo-aware); in another root, adds that root to the existing CI workflow. | 0 / 2 |
+| `run [ID...] [--tag T] [--changed [REF] \| --ci] [--junit F] [--json F] [--seed N]` | Each check must pass; each `must_fail` must fail with its `match`. `--ci` = in a PR build (GitHub Actions, Azure Pipelines, GitLab) only the checks whose files changed vs the target branch, else all. `--changed REF` = vs `REF...HEAD`; bare `--changed` = vs each sync commit. The seed is exported as `VERIKIT_SEED`. | 0 / 1 / 2 |
 | `stale [--strict]` | Checks whose covered files changed since `synced_commit`. | 0 / 1 |
 | `sync ID...` | Refuses with uncommitted covered files; reruns; records HEAD. | 0 / 1 / 2 |
 | `list [--tag T]` | Rule, harm, covers, bounds, variants, sync state, last local pass. | 0 |
 | `tlc SPEC.tla [-c CFG] [--const K=V] [--inv NAME]` | TLC on local Java, else Docker. Shortest counterexample as per-step changes; TLC warnings surfaced; a self-contradicting action is an error (vacuous pass). | 0 / 1 / 2 |
 | `explore MODEL.py` | Breadth-first explorer for small Python models; zero install. | 0 / 1 / 2 |
-| `hook` | Claude Code Stop hook: blocks while edited covered code is unchecked; warns once when a passing check describes older code; never blocks twice in a row. | 0 / 2 |
+| `hook` | Claude Code Stop hook: blocks (JSON `decision: block`) while edited covered code is unchecked; warns once when a passing check describes older code; never blocks twice in a row. | 0 |
 
 Exit codes: 0 = holds, 1 = a property or check failed, 2 = tool or setup error.
 
@@ -191,11 +202,12 @@ and the hook report drift there. Details: [combining-with-tests](docs/combining-
 ```
 verikit.py                 the runner (single file, stdlib only)
 plugin/skills/             verify-survey, verify-create (+ routing, stacks/), verify-maintain
-templates/                 tla/ starter, dotnet/ node/ react/ angular/ test skeletons, ci/, CODEOWNERS
-examples/                  four runnable examples, one per stack, each with broken variants
-scripts/                   check_examples.py (all examples) and e2e.py (monorepo end-to-end)
+templates/                 tla/ starter, dotnet/ node/ react/ test skeletons, ci/ (GitHub, Azure), CODEOWNERS
+examples/                  seven runnable examples, each with broken variants (see examples/README.md)
+scripts/                   check_examples.py (all examples), e2e.py (monorepo + CI end-to-end),
+                           check_ci_templates.py (CI templates against the official schemas)
 tests/                     unit tests for the runner
-docs/                      methodology, combining with tests, roadmap, troubleshooting
+docs/                      methodology, combining with tests, roadmap, troubleshooting, evidence/
 AGENTS.md                  the agent guide
 ```
 

@@ -50,11 +50,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-dotnet@v4   # dotnet-coyote (net8.0) on Linux
+        with:
+          dotnet-version: "8.0.x"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/verikit
           key: verikit-tla-1.7.4
-      - run: python scripts/check_examples.py node-checkout react-pay-button angular-search-store
+      # angular-testbed uses the runner's Google Chrome (headless)
+      - run: python scripts/check_examples.py node-checkout react-pay-button angular-search-store angular-testbed dotnet-coyote
       - run: python scripts/e2e.py
 
   examples-windows:   # .NET Framework (net48) tests need Windows
@@ -67,4 +71,5 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - run: python scripts/check_examples.py dotnet-checkout dotnet-legacy   # legacy: VS MSBuild + vstest via vswhere
+      # legacy: Visual Studio's MSBuild + vstest found via vswhere
+      - run: python scripts/check_examples.py dotnet-checkout dotnet-legacy dotnet-coyote

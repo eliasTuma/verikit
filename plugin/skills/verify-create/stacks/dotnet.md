@@ -1,9 +1,10 @@
 # .NET and .NET Framework
 
 Status: **ran** with FsCheck 2.16.6 + xUnit 2.9 on `net8.0` and `net48` (Windows), see the
-kit's `examples/dotnet-checkout`; and in a **legacy (non-SDK) .NET Framework 4.8** solution with
-MSTest v2 2.2.10 + packages.config (MSBuild 17.11 + vstest 17.11), see `examples/dotnet-legacy`.
-NUnit is **not exercised** by the kit.
+kit's `examples/dotnet-checkout`; in a **legacy (non-SDK) .NET Framework 4.8** solution with
+MSTest v2 2.2.10 + packages.config (MSBuild 17.11 + vstest 17.11), see `examples/dotnet-legacy`;
+and **Microsoft Coyote 1.7.11** on `net8.0` for real async interleavings, see
+`examples/dotnet-coyote`. NUnit is **not exercised** by the kit.
 
 ## Where the checks go
 
@@ -24,9 +25,11 @@ run = "dotnet test tests/Payments.Tests -f net48 --filter Category=Verification"
 run = "{python} verification/legacy_test.py Legacy.sln Legacy.Tests/bin/Release/Legacy.Tests.dll TestCategory=Verification"  # legacy (non-SDK) projects: see below
 ```
 
-The filter property depends on the framework: xUnit traits and NUnit categories use
-`Category=`, MSTest uses `TestCategory=`. A wrong property matches nothing, and the runner
-**exits 0** - a silent pass. With vstest, always add `-- RunConfiguration.TreatNoTestsAsError=true`.
+The filter property depends on the framework: an xUnit trait uses `Category=`, MSTest uses
+`TestCategory=` (for NUnit, check which property your adapter version filters on). A wrong
+property matches nothing, and the runner **exits 0** - a silent pass. Add
+`-- RunConfiguration.TreatNoTestsAsError=true` (vstest and `dotnet test` both accept it), and
+always watch the check fail with its broken variant before trusting a pass.
 
 ## Which tool
 
@@ -34,7 +37,7 @@ The filter property depends on the framework: xUnit traits and NUnit categories 
 |---|---|---|
 | Bad order of steps across services, queues, retries | TLA+ model + `verikit tlc` | Same in every stack. |
 | Generated inputs / event orderings on real code | **FsCheck** (`FsCheck` package, netstandard2.0, works on .NET Framework 4.7.2+ and .NET) | Use from C# with `Prop.ForAll(...).Check(config)`. CsCheck is a good alternative on modern .NET only. |
-| Real `async`/`Task` interleavings, thread races | **Microsoft Coyote** systematic testing | Explores task interleavings. Requires binary rewriting (`coyote rewrite`); check which .NET versions the current release supports before using it on Framework projects. Not exercised by the kit. |
+| Real `async`/`Task` interleavings inside one process (check-then-act across an `await`, a missing or too-narrow lock) | **Microsoft Coyote** 1.7.11 systematic testing | **Ran** on net8.0 (`examples/dotnet-coyote`). Requires binary rewriting after build; see [Coyote](#coyote-async-races) below. net48: rewritten by hand once, not wired. |
 | SQL / EF concurrency (two requests, one row) | Integration test with two real connections | Model the isolation level in TLA+ if the promise depends on it. |
 
 ## Pattern: drive the real class with generated event orderings
@@ -108,3 +111,57 @@ net48; VS 2022 MSBuild 17.11, vstest 17.11.1). xUnit and NUnit inside legacy pro
   in `harness`.
 - **Path length:** `packages\` holds the longest paths (about 140 characters below the solution
   root). Keep the solution root under about 120 characters.
+
+## Coyote (async races)
+
+Status: **ran** - `examples/dotnet-coyote` (Microsoft.Coyote.Test + Microsoft.Coyote.CLI 1.7.11,
+xUnit 2, net8.0, Windows). Linux: runs in the kit's CI. net48: rewritten by hand once, not wired.
+1.7.11 (March 2024) is the latest release; the repository is active again but has not published
+a newer one. net10 test assemblies are not supported by 1.7.11.
+
+- **Pick the tool:**
+  - **Coyote** when the promise breaks only if real `async` methods interleave inside one process:
+    check-then-act across an `await`, a missing or too-narrow `SemaphoreSlim`/lock, a retry that
+    overlaps the first attempt. It runs the unmodified method and chooses which continuation runs
+    at each `await`, `Task.Run`, `SemaphoreSlim` call, and lock or collection access.
+  - **FsCheck** when the code is (or can be wrapped as) event handlers and the question is which
+    event or input comes next. FsCheck cannot pause a real `async` method at an `await`.
+  - **A TLA+ model** when the promise spans processes or instances (two service instances, queue
+    redelivery, database isolation, webhooks). An in-process guard that Coyote verifies does
+    nothing for a second instance: model the instance count, and put
+    `assumes = ["single instance"]` on the Coyote check.
+- **Wiring:**
+  1. At the verification root: `dotnet new tool-manifest`, then
+     `dotnet tool install --local Microsoft.Coyote.CLI --version 1.7.11` (keep `rollForward: false`;
+     the CLI needs the .NET 8 runtime with ASP.NET Core, which the .NET 8 SDK includes).
+  2. Test project: `<PackageReference Include="Microsoft.Coyote.Test" Version="1.7.11" />` (same
+     version as the tool).
+  3. Next to the csproj, copied to the output: `rewrite.coyote.json` =
+     `{"AssembliesPath": ".", "Assemblies": ["Product.dll", "Product.Tests.dll"]}` - only dlls you own.
+  4. A target `AfterTargets="Build"` with `Condition="'$(TargetFrameworkIdentifier)' == '.NETCoreApp'"`
+     that runs `dotnet tool restore` and `dotnet tool run coyote rewrite "$(TargetDir)rewrite.coyote.json"`
+     with `EnvironmentVariables="COYOTE_CLI_TELEMETRY_OPTOUT=1"`. It rewrites `bin/` only, never sources.
+  5. The test: `Configuration.Create().WithTestingIterations(N).WithRandomStrategy()
+     .WithRandomGeneratorSeed(<uint from VERIKIT_SEED>).WithPartiallyControlledConcurrencyAllowed(false)
+     .WithTelemetryEnabled(false)`, then `TestingEngine.Create(config, async () => ...)` and `Run()`.
+     Fail with the bug report, seed and trace paths when `TestReport.NumOfFoundBugs > 0`; also
+     assert that N schedules ran and that internal errors and uncontrolled invocations are empty.
+  6. In the scenario: `Specification.Assert(cond, "{0}", message)` with a message that names the
+     rule (`gift card GC-100 redeemed 2 times ...`), so the manifest's `match` finds it.
+  7. Manifest: `run = "dotnet test tests/X.Tests --filter Category=Verification"` - the build does the rewrite.
+- **Gotchas:**
+  - Without rewriting, a pass means nothing: assert both dlls are rewritten before `Run()`.
+  - Telemetry is on by default in the CLI and the TestingEngine: turn it off in both.
+  - `Specification.Assert(bool, string, params object[])` formats its string; pass the message as
+    an argument, or a `{` in it throws.
+  - `TryEmitReports` does not create its folder: create it under `AppContext.BaseDirectory` (`bin/`)
+    so `verikit run` leaves the tree clean.
+  - Fakes should `await Task.Yield()` (or `Task.Delay`, which Coyote does not actually wait out) to
+    stand in for I/O.
+  - Set the strategy explicitly (the default is a portfolio). This is sampling of schedules: choose
+    N by measuring the first failing schedule over many seeds on the broken variant (in the
+    example: always within 8 of 1000).
+  - Same seed and code, same schedules: `Configuration.WithReproducibleTrace(File.ReadAllText(".trace"))`
+    replays a failure under a debugger.
+  - The whole test project runs on the rewritten dlls; ordinary tests are unaffected, so the check
+    can live in the team's existing test project.
