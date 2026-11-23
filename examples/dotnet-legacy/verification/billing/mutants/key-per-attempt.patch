@@ -1,0 +1,13 @@
+diff --git a/Billing/CheckoutSession.cs b/Billing/CheckoutSession.cs
+index b94c310..c3e817c 100644
+--- a/Billing/CheckoutSession.cs
++++ b/Billing/CheckoutSession.cs
+@@ -81,7 +81,7 @@ namespace Billing
+         // One key per purchase, reused by every retry, so the gateway charges at most once.
+         private string IdempotencyKey()
+         {
+-            return "order-" + _orderId;
++            return "order-" + _orderId + "-attempt-" + _attempt;
+         }
+     }
+ }

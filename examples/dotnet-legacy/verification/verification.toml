@@ -1,0 +1,22 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "checkout-legacy"
+rule = "A customer is never charged twice for one purchase."
+harm = "The customer pays twice for one order: refunds, chargebacks, lost trust."
+level = "code"
+tool = "FsCheck + MSTest v2 in a legacy .NET Framework 4.8 project: generated event orderings on the real CheckoutSession; MSBuild build, vstest.console run"
+tags = ["payments"]
+run = "{python} verification/legacy_test.py Legacy.sln Billing.Tests/bin/Release/Billing.Tests.dll TestCategory=Verification"
+covers = ["Billing/**/*.cs"]
+harness = ["Billing.Tests/CheckoutVerificationTests.cs"]
+bounds = "500 generated schedules, maxRetries 0..3; sampling, not exhaustive"
+assumes = ["The payment gateway charges at most once per idempotency key (the fake models this)."]
+timeout = 900
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: the idempotency key is built per attempt"
+  patch = "verification/billing/mutants/key-per-attempt.patch"
+  match = 'customer charged [2-9] times'
