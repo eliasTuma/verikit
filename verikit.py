@@ -287,7 +287,24 @@ def check_files(root: Path, check: dict) -> list[Path]:
     for area in areas:
         files.update(x for x in area.rglob("*") if x.is_file()
                      and not x.name.startswith((".verikit-", "VerikitTrace")))   # generated during a run
-    return sorted(f for f in files if f.resolve() != Path(__file__).resolve())
+    files = {f for f in files if f.resolve() != Path(__file__).resolve()}
+    # Only what git tracks or would track: a `run` line may name build output (a test dll),
+    # which differs per machine and does not exist in a fresh clone.
+    rels = {}
+    for f in files:
+        try:
+            rels[f.resolve().relative_to(root.resolve()).as_posix()] = f
+        except ValueError:
+            pass                      # outside the verification root: not this check's file
+    try:
+        p = subprocess.run(["git", "ls-files", "-z", "-co", "--exclude-standard", "--",
+                            *[f":(literal){r}" for r in rels]], cwd=root, capture_output=True)
+    except OSError:
+        p = None
+    if rels and p is not None and p.returncode == 0:
+        kept = {r for r in p.stdout.decode("utf-8", "replace").split("\0") if r}
+        return sorted(f for r, f in rels.items() if r in kept)
+    return sorted(rels.values())
 
 
 def current_items(root: Path, check: dict) -> tuple[dict[str, str], list[str]]:
@@ -394,7 +411,22 @@ def _body_end(text: str, i: int) -> tuple[int, str] | None:
         elif ch == "}" and depth <= 0:
             return None                      # the enclosing block ended first: not a declaration
         elif ch == "{" and depth <= 0:
+            # `Promise<{ ok: boolean }>` or `): { ok: boolean } {`: a brace right after < : | & ,
+            # opens a type written inline, not the body. Taking it for the body would cut the
+            # region short, and edits to the real body would then go unnoticed.
+            is_type_literal = text[:i].rstrip()[-1:] in ("<", ":", "|", "&", ",")
             level = 0
+            while is_type_literal and i < len(text):
+                j = _skip_literal(text, i)
+                if j != i:
+                    i = j
+                    continue
+                level += (text[i] == "{") - (text[i] == "}")
+                i += 1
+                if level == 0:
+                    break
+            if is_type_literal:
+                continue
             while i < len(text):
                 j = _skip_literal(text, i)
                 if j != i:
@@ -465,7 +497,8 @@ def extract_region(text: str, symbol: str, suffix: str = "") -> str | None:
         before = text[offsets[line_no]:i]
         after = text[m.end():m.end() + 200].lstrip()
         is_type = re.search(r"\b(class|interface|struct|enum|record|namespace|module|trait|impl)\s+$", before)
-        is_func = (after.startswith("(") or after.startswith("<")) and not CALL_BEFORE.search(before)
+        go_method = re.match(r"\s*func\s*\([^)]*\)\s*$", before)        # func (s *Service) Pay(...) {
+        is_func = (after.startswith("(") or after.startswith("<")) and (go_method or not CALL_BEFORE.search(before))
         is_assigned = re.match(r"[:=]\s*(async\b\s*)?(function\b|\(|[\w$]+\s*=>)", after) and \
             (ASSIGNED_BEFORE.search(before) or not before.strip())
         if not (is_type or is_func or is_assigned):
@@ -1964,7 +1997,10 @@ def load_traces(path: Path, limit: int) -> tuple[list[tuple[str, list[dict]]], i
         seen.setdefault(json.dumps(clean, sort_keys=True), (label, clean))
     if not seen:
         die(f"{path.name} holds no trace: nothing was recorded, so there is nothing to check")
-    return list(seen.values())[:limit], len(raw)
+    if len(seen) > limit:
+        die(f"{len(seen)} distinct traces were recorded, more than --max-traces {limit}. Raise the limit or "
+            "record fewer runs: skipping traces could hide the one the model rejects.")
+    return list(seen.values()), len(raw)
 
 
 def tla_value(v) -> str:
@@ -2491,7 +2527,14 @@ def cmd_init(args) -> int:
         for skill in sorted(skills_src.iterdir()):
             dest = top / ".claude" / "skills" / skill.name
             if dest.exists() and not args.force:
-                print(f"kept existing .claude/skills/{skill.name} (use --force to overwrite)")
+                def digest(folder: Path) -> str:
+                    return hashlib.sha256(b"".join(
+                        f.relative_to(folder).as_posix().encode() + content_digest(f.read_bytes()).encode()
+                        for f in sorted(folder.rglob("*")) if f.is_file())).hexdigest()
+                same = digest(dest) == digest(skill)
+                print(f"kept existing .claude/skills/{skill.name}" + ("" if same else
+                      " - it DIFFERS from this kit's version; run init again with --force to update it "
+                      "(agents follow these files, and older ones describe commands that have changed)"))
                 continue
             if dest.exists():
                 shutil.rmtree(dest)
@@ -2582,7 +2625,7 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_stale)
 
     p = sub.add_parser("sync", parents=[common], help="re-run checks, then record the content they confirmed (verification/sync/)")
-    p.add_argument("ids", nargs="+")
+    p.add_argument("ids", nargs="*", help="check ids (default: every check)")
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--seed", type=int)
     p.set_defaults(fn=cmd_sync)
@@ -2643,7 +2686,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--const", action="append", default=[], metavar="NAME=VALUE")
     p.add_argument("--exact", action="store_true",
                    help="every model step must appear in the trace (default: the model may take unobserved steps)")
-    p.add_argument("--max-traces", type=int, default=200, help="distinct traces to replay (default 200)")
+    p.add_argument("--max-traces", type=int, default=500,
+                   help="fail if more distinct traces than this were recorded (default 500); none is ever skipped")
     p.add_argument("--init", help="name of the model's initial predicate (default: from the .cfg, else Init)")
     p.add_argument("--next", help="name of the model's next-state action (default: from the .cfg, else Next)")
     p.add_argument("--max-states", type=int, default=2_000_000)

@@ -498,6 +498,26 @@ class SyncSurvivesHistoryRewrites(unittest.TestCase):
         (self.r.root / "src" / "obj" / "generated.txt").write_text("build output\n", encoding="utf-8")
         self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
 
+    def test_build_output_named_in_a_run_command_is_not_recorded(self):
+        # like `vstest ... bin/Release/Tests.dll`: the command names a file that every run rebuilds
+        (self.r.top / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (self.r.root / "check.py").write_text(CHECK_PY + textwrap.dedent("""
+            import os, random
+            os.makedirs("build", exist_ok=True)
+            open("build/out.dll", "w").write(str(random.random()))
+        """), encoding="utf-8")
+        manifest = self.r.root / "verification" / "verification.toml"
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+            'run = "{python} check.py"', 'run = "{python} check.py build/out.dll"'), encoding="utf-8")
+        self.r.commit("run names build output")
+        vk("run", "--root", str(self.r.root))                                  # the file exists before sync
+        code, out = vk("sync", "--root", str(self.r.root))                     # no ids: every check
+        self.assertEqual(code, 0, out)
+        record = json.loads((self.r.root / "verification" / "sync" / "guard.json").read_text(encoding="utf-8"))
+        self.assertNotIn("build/out.dll", record["files"])
+        shutil.rmtree(self.r.root / "build")                                   # as in a fresh clone
+        self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
+
     def test_record_from_0_3_is_still_read_and_never_assumed_synced(self):
         sha = git(self.r.top, "rev-parse", "--short=12", "HEAD").strip()
         manifest = self.r.root / "verification" / "verification.toml"
@@ -568,6 +588,43 @@ class AnchoredCovers(unittest.TestCase):
         sql = "SELECT 1;\n-- verikit:begin redeem\nUPDATE c SET x = 1;\n-- verikit:end redeem\nSELECT 2;\n"
         self.assertIn("UPDATE c SET x = 1;", verikit.extract_region(sql, "redeem", ".sql"))
         self.assertNotIn("SELECT 2", verikit.extract_region(sql, "redeem", ".sql"))
+
+    def test_typescript_class_members_keep_their_whole_body(self):
+        ts = textwrap.dedent("""\
+            export class CheckoutService {
+              constructor(private readonly http: HttpClient) {}
+
+              @Retry(3)
+              async payForOrder(order: Order): Promise<{ ok: boolean; id: string }> {
+                const key = `order-${order.id}`;
+                return this.http.post<Receipt>('/pay', { order, key }).toPromise();
+              }
+
+              status(order: Order): { paid: boolean } {
+                return { paid: this.isPaid(order) };
+              }
+
+              private isPaid = (order: Order): boolean => {
+                return !!order.receipt;
+              };
+            }
+        """)
+        pay = verikit.extract_region(ts, "payForOrder", ".ts")
+        self.assertIn("@Retry(3)", pay)
+        self.assertIn("this.http.post<Receipt>", pay)          # the body, not just the inline return type
+        self.assertTrue(pay.rstrip().endswith("}"))
+        self.assertNotIn("status(order", pay)
+        self.assertIn("return { paid: this.isPaid(order) };", verikit.extract_region(ts, "status", ".ts"))
+        arrow = verikit.extract_region(ts, "isPaid", ".ts")
+        self.assertIn("return !!order.receipt;", arrow)
+        self.assertNotIn("return { paid", arrow)                 # the declaration, not the call site
+
+    def test_go_method_with_a_receiver(self):
+        go = "package pay\n\nfunc (s *Service) Pay(o Order) error {\n\tif s.paid(o) {\n\t\treturn nil\n\t}\n\treturn s.gw.Charge(o)\n}\n\nfunc other() { svc.Pay(o) }\n"
+        region = verikit.extract_region(go, "Pay", ".go")
+        self.assertTrue(region.startswith("func (s *Service) Pay(o Order) error {"))
+        self.assertIn("return s.gw.Charge(o)", region)
+        self.assertNotIn("other()", region)
 
     def test_missing_name_is_none_never_empty(self):
         self.assertIsNone(verikit.extract_region(SERVICE_JS, "refundOrder", ".js"))
@@ -1081,6 +1138,12 @@ class TraceChecking(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("the model cannot produce observation 1", out)
 
+    def test_more_traces_than_the_limit_is_an_error_never_a_silent_skip(self):
+        many = [[{"attempt": 1}, {"charges": n % 2}] for n in range(2)] + [self.DOUBLE]
+        code, out = vk("trace", self.MODEL, self.traces(*many), "--max-traces", "2")
+        self.assertEqual(code, 2, out)
+        self.assertIn("more than --max-traces 2", out)
+
     def test_nothing_recorded_is_an_error_not_a_pass(self):
         empty = self.tmp / "empty.jsonl"
         empty.write_text("", encoding="utf-8")
@@ -1160,6 +1223,13 @@ class Init(unittest.TestCase):
             self.assertNotIn(b"\r\n", (r.root / "verification" / "verification.toml").read_bytes())
             self.assertNotIn(b"\r\n", (r.top / ".claude" / "settings.json").read_bytes())
             self.assertTrue((r.top / ".github" / "workflows" / "verify.yml").exists())
+            skill = r.top / ".claude" / "skills" / "verify-maintain" / "SKILL.md"
+            skill.write_text("an older skill that still says synced_commit\n", encoding="utf-8")
+            code, out = vk("init", "--root", str(r.root))
+            self.assertIn("verify-maintain - it DIFFERS from this kit's version", out)   # upgrade must not be silent
+            self.assertNotIn("verify-create - it DIFFERS", out)
+            vk("init", "--root", str(r.root), "--force")
+            self.assertNotIn("synced_commit", skill.read_text(encoding="utf-8"))
             code, out = vk("init", "--root", str(r.root), "--hook")             # idempotent
             self.assertEqual(code, 0)
             settings = json.loads((r.top / ".claude" / "settings.json").read_text(encoding="utf-8"))

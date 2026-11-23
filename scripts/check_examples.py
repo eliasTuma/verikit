@@ -11,8 +11,9 @@ Each example says how to run it in examples/<name>/example.toml:
 
 For each example: copy to a SHORT temp path (.NET Framework test discovery fails silently
 near the 260-character path limit), git init + commit, install dependencies, `verikit init`,
-then `verikit run`. Passes only if every check holds, every broken variant is caught, and the
-working tree is clean afterwards. Prints a summary table; exit 1 if any example fails.
+then `verikit run`, then `sync` and `stale --strict` on a tree with all git-ignored files removed
+(what a fresh clone has). Passes only if every check holds, every broken variant is caught, the
+working tree is clean afterwards, and the sync record still matches. Prints a summary table; exit 1 if any example fails.
 """
 from __future__ import annotations
 
@@ -110,7 +111,20 @@ def check(name: str) -> tuple[str, str]:
         _, dirty = sh(["git", "status", "--porcelain"], repo)
         if dirty.strip():
             return "FAILED", f"working tree not clean after run: {dirty.strip()}"
-        return "PASSED", f"{summary.group(1)}; {variants} broken variant(s) caught; {time.time() - t0:.0f}s"
+        if not RUN_ARGS:   # the sync path too: record, commit, drop all build output, still in sync
+            code, out = sh([sys.executable, "verification/verikit.py", "sync", "--seed", "1"], repo)
+            if code != 0:
+                print(out)
+                return "FAILED", "sync failed"
+            sh(["git", "add", "-A"], repo)
+            sh(["git", "commit", "-qm", "sync"], repo)
+            sh(["git", "clean", "-qfdX"], repo)        # what a fresh clone has: no build output, no deps
+            code, out = sh([sys.executable, "verification/verikit.py", "stale", "--strict"], repo)
+            if code != 0:
+                print(out)
+                return "FAILED", "stale after sync and a clean checkout"
+        how = "isolated" if RUN_ARGS else "sync record survives a clean checkout"
+        return "PASSED", f"{summary.group(1)}; {variants} broken variant(s) caught; {how}; {time.time() - t0:.0f}s"
     finally:
         rmtree(work)
 

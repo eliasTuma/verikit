@@ -34,10 +34,26 @@ variants, slow or intrusive runs, results nobody reads, and a model that drifts 
   schedules. Ran on PostgreSQL 16 only.
 - README states plainly that the kit has not yet been used on a large production codebase.
 
+Fixes:
+- **Sync records no longer include build output.** A `run` line that names a built file (a
+  test dll, as in the legacy .NET example) put that file in the record, so in 0.3.1 `sync`
+  failed there with "covered files changed while the check was running". Records now hold only
+  files git tracks or would track. `check_examples.py` runs `sync`, then `stale --strict` on a
+  tree with every git-ignored file removed, for every example.
+- `sync` with no ids syncs every check.
+- `init` says when an installed skill differs from the kit's version, instead of silently
+  keeping the old text.
+
+**Upgrading from 0.3.x:** re-run `init --hook --force` in each verification root (`--force`
+replaces the installed skills, which described the old commit-based sync), then
+`python verification/verikit.py sync` once and commit `verification/sync/`.
+
 ## 0.3.1 - 2026-11-24
 
 Two bugs that broke the kit in an ordinary team workflow, plus one portability bug. Upgrade by
-re-running `init --hook` in each repo, then `verikit sync <id>` once per check.
+re-running `init --hook --force` in each repo (`--force` also replaces the installed skills,
+which described the old flow), then `verikit sync <id>` once per check. Known issue, fixed in
+0.4.0: `sync` fails when a check's `run` line names a build output file.
 
 - **Sync no longer depends on a commit staying reachable.** 0.3 stored a commit id per check;
   a squash merge, a rebase or a shallow clone made it unreachable, so every check showed as

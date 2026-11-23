@@ -110,7 +110,9 @@ python verification/verikit.py stale                  # checks whose code change
 
 `init` writes `verification/verification.toml`, a vendored `verification/verikit.py`
 (commit both), the skills into `.claude/skills/`, the Stop hook into `.claude/settings.json`,
-and the CI workflow(s). Re-running `init` upgrades the vendored runner and leaves everything else alone.
+and the CI workflow(s). Re-running `init --hook` upgrades the vendored runner and the hook
+command; it keeps installed skills and tells you when they differ from the kit's (add `--force`
+to replace them, which you want after an upgrade: agents follow those files).
 
 **Skills as a Claude Code plugin instead** (one install per machine, all repos):
 `/plugin marketplace add eliasTuma/verikit`, then `/plugin install verikit@verikit`; run `init`
@@ -209,7 +211,9 @@ More manifest options:
 
 - **Cover one function, not a whole file:** `covers = ["src/Payments/CheckoutService.cs#PayForOrder"]`.
   Edits elsewhere in the file are then not drift. If the name disappears, `stale` says
-  "anchor not found" and `sync` refuses.
+  "anchor not found" and `sync` refuses. The function is found by a text heuristic, tested on
+  C#, JavaScript, TypeScript, Go and Python samples; for anything it does not find, put
+  `verikit:begin NAME` / `verikit:end NAME` comments around the code.
 - **Broken variant by find-and-replace:**
   `edits = [{ file = "src/pay.js", find = 'if (order.paid) return;', replace = '' }]`. `find` must
   match exactly once. Unlike a diff, it keeps applying when code around the guard changes.
