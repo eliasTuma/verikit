@@ -280,7 +280,8 @@ def check_files(root: Path, check: dict) -> list[Path]:
                 if vdir in rp.parents and rp.parent != vdir:
                     areas.add(rp.parent)
     for area in areas:
-        files.update(x for x in area.rglob("*") if x.is_file() and not x.name.startswith(".verikit-"))
+        files.update(x for x in area.rglob("*") if x.is_file()
+                     and not x.name.startswith((".verikit-", "VerikitTrace")))   # generated during a run
     return sorted(f for f in files if f.resolve() != Path(__file__).resolve())
 
 
@@ -1926,6 +1927,306 @@ def cmd_explore(args) -> int:
     return OK
 
 
+# --------------------------------------------------------------------------- trace checking
+
+def load_traces(path: Path, limit: int) -> tuple[list[tuple[str, list[dict]]], int]:
+    """Recorded traces from a JSON Lines file: one trace per line, either a list of
+    observations or {"label": ..., "trace": [...]}. An observation is an object that maps
+    model variable names to the values the real code had at that moment. Returns the distinct
+    traces (label, observations) and how many were recorded."""
+    try:
+        raw = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        die(f"no trace file at {path}: the recording command did not write VERIKIT_TRACE_FILE")
+    seen: dict[str, tuple[str, list[dict]]] = {}
+    for n, line in enumerate(raw, 1):
+        try:
+            obj = json.loads(line)
+        except ValueError as e:
+            die(f"{path.name} line {n}: not JSON ({e})")
+        label, events = (str(obj.get("label", "")), obj.get("trace")) if isinstance(obj, dict) else ("", obj)
+        if not isinstance(events, list) or not events:
+            die(f"{path.name} line {n}: a trace must be a non-empty list of observations")
+        clean: list[dict] = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                die(f"{path.name} line {n}: each observation must be an object of variable -> value")
+            ev = {k: v for k, v in ev.items() if v is not None}
+            if not ev:
+                die(f"{path.name} line {n}: an observation names no model variable, so it checks nothing")
+            if not clean or clean[-1] != ev:        # the same state logged twice is one observation
+                clean.append(ev)
+        seen.setdefault(json.dumps(clean, sort_keys=True), (label, clean))
+    if not seen:
+        die(f"{path.name} holds no trace: nothing was recorded, so there is nothing to check")
+    return list(seen.values())[:limit], len(raw)
+
+
+def tla_value(v) -> str:
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, str):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if isinstance(v, list):
+        return "<<" + ", ".join(tla_value(x) for x in v) + ">>"
+    if isinstance(v, dict) and set(v) == {"set"} and isinstance(v["set"], list):
+        return "{" + ", ".join(tla_value(x) for x in v["set"]) + "}"
+    if isinstance(v, dict) and v:
+        return "[" + ", ".join(f"{k} |-> {tla_value(x)}" for k, x in v.items()) + "]"
+    die(f"trace value {v!r} cannot be written in TLA+; use numbers, strings, booleans, lists or {{\"set\": [...]}}")
+
+
+def tla_variables(tla_text: str) -> list[str]:
+    names: list[str] = []
+    for block in re.findall(r"(?ms)^\s*VARIABLES?\b(.*?)(?=^\s*$|^\s*[A-Za-z_]\w*(?:\([^)]*\))?\s*==|^\s*(?:CONSTANTS?|ASSUME|EXTENDS)\b)", tla_text):
+        block = re.sub(r"\\\*[^\n]*", "", re.sub(r"(?s)\(\*.*?\*\)", "", block))
+        names += [n for n in re.split(r"[\s,]+", block) if re.fullmatch(r"[A-Za-z_]\w*", n)]
+    return names
+
+
+def trace_module(name: str, spec_module: str, traces: list[tuple[str, list[dict]]], init: str, nxt: str,
+                 exact: bool) -> str:
+    """A TLA+ module that follows the model while consuming one recorded trace: vk_t is the
+    trace, vk_i the next observation to match. An observation is consumed by a model step whose
+    new state has the observed values; with hidden steps allowed, the model may also take steps
+    the recording did not see. A trace is accepted when TLC reaches vk_i = length + 1."""
+    def obs(ev: dict, prime: str) -> str:
+        return "(" + " /\\ ".join(f"{k}{prime} = {tla_value(v)}" for k, v in sorted(ev.items())) + ")"
+
+    def cases(prime: str) -> str:
+        rows = [f"t = {t} /\\ k = {k} -> {obs(ev, prime)}"
+                for t, (_, events) in enumerate(traces, 1) for k, ev in enumerate(events, 1)]
+        return "\n      [] ".join(rows)
+
+    lens = " [] ".join(f"t = {t} -> {len(events)}" for t, (_, events) in enumerate(traces, 1))
+    plain, primed, count = cases(""), cases("'"), len(traces)
+    hidden = "" if exact else f"\n    \\/ ({nxt} /\\ UNCHANGED <<vk_t, vk_i>>)"
+    return f"""---- MODULE {name} ----
+\\* Generated by `verikit trace`; deleted after the run.
+EXTENDS {spec_module}, Naturals, TLC
+VARIABLES vk_t, vk_i
+
+VkLen(t) == CASE {lens} [] OTHER -> 0
+VkObs(t, k) ==
+    CASE {plain}
+      [] OTHER -> FALSE
+VkObsNext(t, k) ==
+    CASE {primed}
+      [] OTHER -> FALSE
+VkInit ==
+    /\\ {init}
+    /\\ vk_t \\in 1..{count}
+    /\\ (vk_i = 1 \\/ (vk_i = 2 /\\ VkObs(vk_t, 1)))
+VkNext ==
+    \\/ (vk_i <= VkLen(vk_t) /\\ {nxt} /\\ VkObsNext(vk_t, vk_i) /\\ vk_t' = vk_t /\\ vk_i' = vk_i + 1){hidden}
+VkSeen == PrintT(<<"vk-seen", vk_t, vk_i>>)
+====
+"""
+
+
+def _tlc_exec(spec: Path, cfg_rel: str, timeout: int, docker: bool = False) -> tuple[str, str, float]:
+    """Run TLC (one worker) on `spec` with `cfg_rel`; returns (output, where it ran, seconds)."""
+    jar = _ensure_tla_jar()
+    tlc_args = ["-workers", "1", "-config", cfg_rel, spec.name]
+    java = os.environ.get("VERIKIT_JAVA") or shutil.which("java")
+    tmp_meta = None
+    if java and not docker:
+        tmp_meta = tempfile.mkdtemp(prefix="tlc-")
+        cmd = [java, "-XX:+UseParallelGC", "-cp", str(jar), "tlc2.TLC", "-metadir", tmp_meta, *tlc_args]
+        where = "local Java"
+    elif _docker_ok():
+        cmd = ["docker", "run", "--rm",
+               "--mount", f"type=bind,source={spec.parent},target=/spec",
+               "--mount", f"type=bind,source={jar.parent},target=/tools,readonly",
+               "-w", "/spec", JAVA_IMAGE, "java", "-XX:+UseParallelGC",
+               "-cp", f"/tools/{jar.name}", "tlc2.TLC", "-metadir", "/tmp/tlc", *tlc_args]
+        where = f"Docker ({JAVA_IMAGE})"
+    else:
+        die("TLC needs Java 11+ on PATH (or VERIKIT_JAVA), or a running Docker daemon.")
+    t0 = time.time()
+    try:
+        p = subprocess.run(cmd, cwd=spec.parent, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        die(f"TLC timed out after {timeout}s - record fewer or shorter traces, or shrink the model")
+    finally:
+        if tmp_meta:
+            shutil.rmtree(tmp_meta, ignore_errors=True)
+    return (p.stdout + p.stderr).replace("\r\n", "\n"), where, time.time() - t0
+
+
+def _trace_tla(args, spec: Path, traces: list[tuple[str, list[dict]]]) -> dict[int, int]:
+    """For each trace (1-based), how many observations the TLA+ model could follow."""
+    text = spec.read_text(encoding="utf-8")
+    cfg = Path(args.config).resolve() if args.config else spec.with_suffix(".cfg")
+    if not cfg.exists():
+        die(f"config {cfg} not found")
+    known = tla_variables(text)
+    used = sorted({k for _, events in traces for ev in events for k in ev})
+    unknown = [k for k in used if k not in known]
+    if unknown:
+        die(f"the traces observe {', '.join(unknown)}, which {spec.name} does not declare. "
+            f"Its variables are: {', '.join(known) or '(none found)'}")
+    consts = {}
+    for kv in args.const:
+        k, sep, v = kv.partition("=")
+        if not sep or not k.strip():
+            die(f"--const expects NAME=VALUE, got {kv!r}")
+        consts[k.strip()] = v.strip()
+    cfg_text = transform_cfg(cfg.read_text(encoding="utf-8"), consts, None)
+    init, nxt = args.init, args.next
+    kept, section = [], None
+    for line in cfg_text.splitlines():
+        body = line.split("\\*")[0].strip()
+        first = body.split()[0] if body else ""
+        if first in CFG_KEYWORDS:
+            section = first
+            rest = body[len(first):].strip()
+            if first == "INIT" and rest and not init:
+                init = rest
+            if first == "NEXT" and rest and not nxt:
+                nxt = rest
+            if first == "SPECIFICATION" and rest and not (init and nxt):
+                m = re.search(rf"(?m)^{re.escape(rest)}\s*==\s*(\w+)\s*/\\\s*\[\]\[\s*(\w+)\s*\]_", text)
+                if m:
+                    init, nxt = init or m.group(1), nxt or m.group(2)
+        if section and section.startswith("CONSTANT"):
+            kept.append(line)
+    init, nxt = init or "Init", nxt or "Next"
+    name = f"VerikitTrace{os.getpid()}{random.randrange(10**6)}"
+    mod, mod_cfg = spec.parent / f"{name}.tla", spec.parent / f"{name}.cfg"
+    spec_module = re.search(r"MODULE\s+(\w+)", text).group(1)
+    try:
+        mod.write_text(trace_module(name, spec_module, traces, init, nxt, args.exact), encoding="utf-8")
+        mod_cfg.write_text("\n".join([*kept, "INIT VkInit", "NEXT VkNext", "INVARIANT VkSeen",
+                                      "CHECK_DEADLOCK FALSE", ""]), encoding="utf-8")
+        out, where, secs = _tlc_exec(mod, mod_cfg.name, args.timeout, args.docker)
+    finally:
+        mod.unlink(missing_ok=True)
+        mod_cfg.unlink(missing_ok=True)
+    if args.raw:
+        print(out)
+    if "Model checking completed. No error has been found." not in out:
+        print(out if not args.raw else "")
+        die(f"TLC could not replay the traces against {spec.name} (see its output above)")
+    print(f"[verikit] replayed with TLC {TLA_VERSION} via {where} ({secs:.1f}s)")
+    reached: dict[int, int] = {}
+    for t, i in re.findall(r'<<"vk-seen", (\d+), (\d+)>>', out):
+        reached[int(t)] = max(reached.get(int(t), 0), int(i) - 1)
+    return reached
+
+
+def _trace_python(args, path: Path, traces: list[tuple[str, list[dict]]]) -> dict[int, int]:
+    """The same replay for a Python explorer model (init() / next(state))."""
+    spec = importlib.util.spec_from_file_location("verikit_model", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    consts = getattr(mod, "CONSTANTS", {})
+    for kv in args.const:
+        k, _, v = kv.partition("=")
+        if k not in consts:
+            die(f"unknown constant {k!r}; the model defines {', '.join(consts) or 'none'}")
+        try:
+            consts[k] = ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            consts[k] = v
+
+    def norm(v):
+        if isinstance(v, list):
+            return tuple(norm(x) for x in v)
+        if isinstance(v, dict) and set(v) == {"set"}:
+            return frozenset(norm(x) for x in v["set"])
+        return v
+
+    def closure(states: dict) -> dict:      # everything reachable in zero or more steps
+        todo, found = list(states.values()), dict(states)
+        while todo:
+            for _, s2 in mod.next(todo.pop()):
+                key = _freeze(s2)
+                if key not in found:
+                    found[key] = s2
+                    todo.append(s2)
+                    if len(found) > args.max_states:
+                        die(f"more than {args.max_states} model states while replaying; shrink the constants")
+        return found
+
+    def step(states: dict) -> dict:
+        return {_freeze(s2): s2 for s in states.values() for _, s2 in mod.next(s)}
+
+    start = {_freeze(s): s for s in mod.init()}
+    variables = set(next(iter(start.values())))
+    reached: dict[int, int] = {}
+    for t, (_, events) in enumerate(traces, 1):
+        unknown = sorted({k for ev in events for k in ev} - variables)
+        if unknown:
+            die(f"the traces observe {', '.join(unknown)}, which the model's states do not have. "
+                f"Its variables are: {', '.join(sorted(variables))}")
+        current, reached[t] = start, 0
+        for k, ev in enumerate(events):
+            if args.exact:
+                pool = {**(current if k == 0 else {}), **step(current)}
+            else:
+                pool = closure(current if k == 0 else step(current))
+            current = {key: s for key, s in pool.items() if all(s[n] == norm(v) for n, v in ev.items())}
+            if not current:
+                break
+            reached[t] = k + 1
+    return reached
+
+
+def cmd_trace(args) -> int:
+    """Check that what the real code did (recorded in tests) is something the model allows."""
+    model = Path(args.model).resolve()
+    if not model.exists():
+        die(f"{model} not found")
+    tmp_dir = None
+    if args.record:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="verikit-trace-"))
+        traces_path = tmp_dir / "traces.jsonl"
+        code, out, secs = run_shell(args.record, Path.cwd(), args.timeout, None,
+                                    {"VERIKIT_TRACE_FILE": str(traces_path),
+                                     **({"VERIKIT_SEED": os.environ["VERIKIT_SEED"]} if os.environ.get("VERIKIT_SEED") else {})})
+        if code != 0:
+            print(tail(out))
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            die(f"the recording command failed (exit {code}), so no trace was checked: {args.record}")
+    elif args.traces:
+        traces_path = Path(args.traces).resolve()
+    else:
+        die("give a trace file, or --record COMMAND (it must write traces to $VERIKIT_TRACE_FILE)")
+    try:
+        traces, recorded = load_traces(traces_path, args.max_traces)
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    sizes = sorted(len(events) for _, events in traces)
+    print(f"[verikit] trace: {len(traces)} distinct trace(s) of {recorded} recorded, {sizes[0]}-{sizes[-1]} "
+          f"observations each, against {model.name} "
+          f"({'every step must be observed' if args.exact else 'unobserved model steps allowed'})")
+    reached = _trace_python(args, model, traces) if model.suffix == ".py" else _trace_tla(args, model, traces)
+    rejected = [(t, label, events) for t, (label, events) in enumerate(traces, 1) if reached.get(t, 0) < len(events)]
+    if not rejected:
+        print(f"[ok] every recorded trace is a behaviour the model allows ({len(traces)} distinct)")
+        return OK
+    print(f"[TRACE REJECTED] {len(rejected)} of {len(traces)} distinct trace(s) are not behaviours of the model: "
+          "the real code reached a state the model says is impossible")
+    for t, label, events in rejected[:5]:
+        k = reached.get(t, 0)
+        print(f"  trace {t}{' (' + label + ')' if label else ''}: the model follows observations 1-{k}, then has "
+              f"no step to observation {k + 1}:" if k else
+              f"  trace {t}{' (' + label + ')' if label else ''}: the model cannot produce observation 1:")
+        for n, ev in enumerate(events[:k + 1], 1):
+            mark = "  <- not allowed by the model" if n == k + 1 else ""
+            print(f"    {n:>2}. " + ", ".join(f"{name}={json.dumps(v)}" for name, v in sorted(ev.items())) + mark)
+    if len(rejected) > 5:
+        print(f"  ... and {len(rejected) - 5} more")
+    print("Either the code has a bug, or the model no longer describes the code. Replay the trace against "
+          "both, and fix the one that is wrong.")
+    return FAILED
+
+
 # --------------------------------------------------------------------------- doctor
 
 def _read(p: Path) -> str:
@@ -2317,6 +2618,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--docker", action="store_true", help="use Docker even if Java is installed")
     p.add_argument("--raw", action="store_true", help="also print TLC's raw output")
     p.set_defaults(fn=cmd_tlc)
+
+    p = sub.add_parser("trace", help="check that traces recorded from the real code are behaviours of the model")
+    p.add_argument("model", help="SPEC.tla (checked with TLC) or MODEL.py (built-in explorer)")
+    p.add_argument("traces", nargs="?", help="JSON Lines file: one trace per line, each a list of observations")
+    p.add_argument("--record", metavar="COMMAND",
+                   help="run COMMAND first; it must append traces to the file named by $VERIKIT_TRACE_FILE")
+    p.add_argument("--config", "-c")
+    p.add_argument("--const", action="append", default=[], metavar="NAME=VALUE")
+    p.add_argument("--exact", action="store_true",
+                   help="every model step must appear in the trace (default: the model may take unobserved steps)")
+    p.add_argument("--max-traces", type=int, default=200, help="distinct traces to replay (default 200)")
+    p.add_argument("--init", help="name of the model's initial predicate (default: from the .cfg, else Init)")
+    p.add_argument("--next", help="name of the model's next-state action (default: from the .cfg, else Next)")
+    p.add_argument("--max-states", type=int, default=2_000_000)
+    p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--docker", action="store_true", help="use Docker even if Java is installed")
+    p.add_argument("--raw", action="store_true", help="also print TLC's raw output")
+    p.set_defaults(fn=cmd_trace)
 
     p = sub.add_parser("explore", help="exhaustively explore a Python state-machine model")
     p.add_argument("model")

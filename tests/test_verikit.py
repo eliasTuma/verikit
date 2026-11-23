@@ -1043,6 +1043,81 @@ class Explorer(unittest.TestCase):
         self.assertEqual(vk("explore", self.MODEL, "--inv", "NeverCharged")[0], 1)
 
 
+class TraceChecking(unittest.TestCase):
+    """`verikit trace`: what the real code did (recorded in tests) must be something the model
+    allows. Here against the Python model; the TLA+ path runs in examples/node-checkout."""
+    MODEL = str(KIT / "examples" / "explorer" / "checkout_model.py")
+    PAID = [{"attempt": 1, "client": "waiting"}, {"charges": 1}, {"client": "paid", "charges": 1}]
+    DOUBLE = [{"attempt": 1}, {"attempt": 2}, {"charges": 1}, {"charges": 2}]
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="verikit-trace-test-"))
+        self.addCleanup(rmtree, self.tmp)
+
+    def traces(self, *traces) -> str:
+        path = self.tmp / "traces.jsonl"
+        path.write_text("".join(json.dumps(t) + "\n" for t in traces), encoding="utf-8")
+        return str(path)
+
+    def test_behaviour_the_model_allows_is_accepted(self):
+        code, out = vk("trace", self.MODEL, self.traces(self.PAID, {"label": "again", "trace": self.PAID}))
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 distinct trace(s) of 2 recorded", out)        # duplicates are replayed once
+        self.assertIn("[ok] every recorded trace is a behaviour the model allows", out)
+
+    def test_state_the_model_forbids_is_rejected_at_the_right_step(self):
+        code, out = vk("trace", self.MODEL, self.traces(self.PAID, self.DOUBLE))
+        self.assertEqual(code, 1, out)
+        self.assertIn("[TRACE REJECTED] 1 of 2 distinct trace(s)", out)
+        self.assertIn("the model follows observations 1-3, then has no step to observation 4", out)
+        self.assertIn("charges=2  <- not allowed by the model", out)
+        # the same trace is fine for the broken design, so the rejection comes from the model, not the tool
+        self.assertEqual(vk("trace", self.MODEL, self.traces(self.DOUBLE), "--const", "ReuseKey=False")[0], 0)
+
+    def test_exact_mode_does_not_allow_unobserved_steps(self):
+        skipped = [{"client": "paid"}]                                   # the steps before it were not recorded
+        self.assertEqual(vk("trace", self.MODEL, self.traces(skipped))[0], 0)
+        code, out = vk("trace", self.MODEL, self.traces(skipped), "--exact")
+        self.assertEqual(code, 1, out)
+        self.assertIn("the model cannot produce observation 1", out)
+
+    def test_nothing_recorded_is_an_error_not_a_pass(self):
+        empty = self.tmp / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        code, out = vk("trace", self.MODEL, str(empty))
+        self.assertEqual(code, 2, out)
+        self.assertIn("holds no trace", out)
+        code, out = vk("trace", self.MODEL, self.traces([{"attempt": 1}, {}]))
+        self.assertEqual(code, 2, out)
+        self.assertIn("names no model variable", out)
+        code, out = vk("trace", self.MODEL, self.traces([{"refunds": 1}]))
+        self.assertEqual(code, 2, out)
+        self.assertIn("which the model's states do not have", out)
+
+    def test_record_runs_the_command_and_fails_if_it_fails(self):
+        rec = self.tmp / "rec.py"
+        rec.write_text("import json, os, sys\n"
+                       "if len(sys.argv) > 1: sys.exit(3)\n"
+                       "open(os.environ['VERIKIT_TRACE_FILE'], 'a').write(json.dumps(" + repr(self.PAID) + ") + '\\n')\n",
+                       encoding="utf-8")
+        code, out = vk("trace", self.MODEL, "--record", f'{{python}} "{rec}"')
+        self.assertEqual(code, 0, out)
+        code, out = vk("trace", self.MODEL, "--record", f'{{python}} "{rec}" fail')
+        self.assertEqual(code, 2, out)
+        self.assertIn("the recording command failed", out)
+        self.assertNotIn("TRACE REJECTED", out)                          # a crash must not look like a finding
+
+    def test_tla_text_helpers(self):
+        self.assertEqual(verikit.tla_value([1, "a", True, {"set": [2]}]), '<<1, "a", TRUE, {2}>>')
+        tla = "VARIABLES\n    client,      \\* where it is\n    attempt, charges\n\nvars == <<client>>\n"
+        self.assertEqual(verikit.tla_variables(tla), ["client", "attempt", "charges"])
+        module = verikit.trace_module("T", "Checkout", [("", [{"charges": 1}])], "Init", "Next", exact=False)
+        self.assertIn("EXTENDS Checkout, Naturals, TLC", module)
+        self.assertIn("t = 1 /\\ k = 1 -> (charges' = 1)", module)
+        self.assertIn("UNCHANGED <<vk_t, vk_i>>", module)
+        self.assertNotIn("UNCHANGED", verikit.trace_module("T", "C", [("", [{"x": 1}])], "Init", "Next", exact=True))
+
+
 class Doctor(unittest.TestCase):
     def test_classifies_dotnet_and_js(self):
         tmp = Path(tempfile.mkdtemp(prefix="verikit-doc-"))

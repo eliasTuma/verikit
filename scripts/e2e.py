@@ -94,17 +94,17 @@ def main() -> int:
         vk = [PY, "verification/verikit.py"]
         junit = tmp / "junit.xml"
         out = sh([*vk, "run", "--seed", "7", "--junit", str(junit)], svc)
-        must("2/2 checks OK" in out, "both checks hold and every broken variant is caught", out)
-        must(out.count("[ok]   must fail") == 3, "three broken variants went red", out)
+        must("3/3 checks OK" in out, "all three checks hold and every broken variant is caught", out)
+        must(out.count("[ok]   must fail") == 5, "five broken variants went red", out)
         must("failures=\"0\"" in junit.read_text(encoding="utf-8"), "JUnit report written with 0 failures")
         must(sh(["git", "status", "--porcelain"], repo).strip() == "", "patch variant reverted; tree clean")
 
-        out = sh([*vk, "sync", "checkout-design", "checkout-code", "--seed", "7"], svc)
+        out = sh([*vk, "sync", "checkout-design", "checkout-code", "checkout-conformance", "--seed", "7"], svc)
         must((svc / "verification" / "sync" / "checkout-code.json").exists(), "sync wrote a record per check")
         sh(["git", "add", "-A"], repo)
         sh(["git", "commit", "-qm", "sync verification"], repo)
         out = sh([*vk, "stale"], svc)
-        must(out.count("synced ") == 2, "both checks synced", out)
+        must(out.count("synced ") == 3, "all three checks synced", out)
         must("no check covers a changed file" in sh([*vk, "run", "--changed"], svc), "--changed runs nothing when nothing changed")
 
         # A refactor reintroduces the bug, committed. The model cannot see it; the rest must.
@@ -122,7 +122,7 @@ def main() -> int:
                     "SYSTEM_PULLREQUEST_TARGETBRANCH": "refs/heads/main"}
         out = sh([*vk, "run", "--ci", "--seed", "7", "--junit", "verify-results.xml"], svc, expect=1, env=azure_pr)
         must("Azure Pipelines pull request into main" in out, "--ci reads the Azure PR target branch", out)
-        must("1/2 checks OK; failing: checkout-code" in out, "the Azure PR build catches the regression", out)
+        must("1/3 checks OK; failing: checkout-code, checkout-conformance" in out, "the Azure PR build catches the regression", out)
         report = (svc / "verify-results.xml").read_text(encoding="utf-8")
         must(re.search(r'<testsuites[^>]* failures="[1-9]', report) is not None and "checkout-code" in report, "JUnit for the Tests tab names the failing check")
         (svc / "verify-results.xml").unlink()
@@ -131,8 +131,8 @@ def main() -> int:
                  env={"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push"})
         must("not a pull request; running every check" in out, "--ci on a push runs every check", out)
         out = sh([*vk, "run", "--changed", "--seed", "7"], svc, expect=1)
-        must("== checkout-design" in out and "== checkout-code" in out, "--changed picks both checks", out)
-        must("1/2 checks OK; failing: checkout-code" in out, "design check stays green (blind), code check goes red", out)
+        must("== checkout-design" in out and "== checkout-code" in out, "--changed picks the checks", out)
+        must("1/3 checks OK; failing: checkout-code, checkout-conformance" in out, "design check stays green (blind); the code check and the trace check go red", out)
         out = sh([*vk, "stale", "--strict"], svc, expect=1)
         must("stale" in out, "stale flags the drift", out)
         out = sh([PY, str(svc / "verification" / "verikit.py"), "hook"], repo,

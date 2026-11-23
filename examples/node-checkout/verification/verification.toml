@@ -45,6 +45,32 @@ assumes = ["The fake provider deduplicates by idempotency key, as real providers
   edits = [{ file = "src/checkout.js", find = 'amount: order.amount, idempotencyKey });', replace = 'amount: order.amount, idempotencyKey: `${idempotencyKey}-attempt-${attempt}` });' }]
   match = 'customer charged [2-9] times'
 
+[[check]]
+id = "checkout-conformance"
+rule = "The real payForOrder() only does what the design model allows."
+harm = "The design check keeps passing on a model that no longer describes the code, so it proves nothing about what ships."
+level = "conformance"
+tool = "traces of the real payForOrder() (fast-check scheduler), replayed against Checkout.tla with TLC"
+tags = ["payments"]
+run = '{verikit} trace verification/checkout/Checkout.tla --record "node --test test/checkout.trace.test.js"'
+covers = ["src/checkout.js"]
+harness = ["test/checkout.trace.test.js"]
+bounds = "200 recorded runs with maxRetries = 2 (the model's MaxAttempts = 3); observes requests sent, charges made and the final outcome"
+assumes = [
+  "It shows that the code stays inside the model. Behaviour the model allows but the code never shows is not detected.",
+  "The model may take steps the recording does not see (a reply still travelling, for example).",
+]
+
+  [[check.must_fail]]
+  why = "Broken code: every attempt sends its own idempotency key, so the code charges twice and the model cannot follow it"
+  edits = [{ file = "src/checkout.js", find = 'amount: order.amount, idempotencyKey });', replace = 'amount: order.amount, idempotencyKey: `${idempotencyKey}-attempt-${attempt}` });' }]
+  match = 'TRACE REJECTED'
+
+  [[check.must_fail]]
+  why = "Model out of step with the code: with MaxAttempts = 2 the model cannot follow the code's third attempt"
+  run = '{verikit} trace verification/checkout/Checkout.tla --const MaxAttempts=2 --record "node --test test/checkout.trace.test.js"'
+  match = 'TRACE REJECTED'
+
 # `run --isolated`: broken variants run in a throwaway copy of the repo. Dependency folders that
 # git ignores are linked into the copy (never copied, never deleted).
 [isolation]
