@@ -14,5 +14,13 @@
 | `[error] ... an action contradicts itself` | A TLA+ action sets a variable it also lists as UNCHANGED | Fix the action; the pass was vacuous |
 | The Stop hook blocks | Covered code changed and no passing run has seen it, or a passing check is stale | Run the named check, or re-confirm and `sync`. It never blocks twice in a row. |
 | Hook does nothing on Windows without Git Bash | Hooks then run in PowerShell | The `${CLAUDE_PROJECT_DIR}` form that `init` writes works in both shells; re-run `init --hook` if it was edited |
-| `stale` shows `unknown` | The sync commit is not in local history (shallow clone) | Use `fetch-depth: 0` in CI |
-| First TLA+ run is slow | Docker image pull and jar download | Cached afterwards in `~/.cache/verikit` |
+| `stale` shows `unknown` | The sync commit is not in local history (shallow clone) | Use `fetch-depth: 0` (GitHub) / `fetchDepth: 0` (Azure) in CI |
+| First TLA+ run is slow | Docker image pull and jar download | Cached afterwards in `~/.cache/verikit` (`VERIKIT_CACHE`) |
+| `--ci: ... missing or shares no history with HEAD ... Running every check instead` | Shallow checkout, or the target branch was not fetched | Set `fetch-depth: 0` / `fetchDepth: 0`. verikit still runs every check, so nothing is skipped; it is only slower |
+| Azure Repos: no build on pull requests | The YAML `pr:` trigger does not apply to Azure Repos | Add the pipeline as a *Build validation* branch policy on the target branch |
+| Azure: TLC fails with an old Java | The image's default `java` is older than 11 | Keep the template's `JavaToolInstaller@0` step (`versionSpec: "21"`, `PreInstalled`) |
+| Legacy .NET Framework: the check passes but ran no test | Wrong filter property (MSTest uses `TestCategory=`, xUnit/NUnit `Category=`), or `dotnet test` on a non-SDK project (runs nothing, exit 0) | Use `legacy_test.py` from `examples/dotnet-legacy` (MSBuild + vstest, fails when no test ran) |
+| Legacy .NET Framework: new test file never runs | Not listed in the test `.csproj`'s `<Compile Include>` items | Add the `<Compile>` line |
+| `dotnet restore`: "Nothing to do" on a legacy solution | packages.config is restored by MSBuild 16.5+ or nuget.exe, not `dotnet` | `msbuild X.sln -restore -p:RestorePackagesConfig=true` |
+| `could not revert ... patch` (0.2.x) with `core.autocrlf=true` | `git apply` rewrote LF files as CRLF, so the bytes differed | Fixed in 0.3: verikit restores byte-exact backups. Upgrade by re-running `init` |
+| Claude Code shows "Stop hook" / "hook error" while the agent keeps working | That is how the app shows any Stop hook that blocks | Expected. The agent received the reason and is running the named check |

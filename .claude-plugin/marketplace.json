@@ -1,5 +1,6 @@
 {
   "name": "verikit",
+  "description": "verikit: machine-checked promises beside your existing tests (TLA+ models, property and concurrency tests, broken variants that must fail, drift tracking).",
   "owner": {
     "name": "eliasTuma"
   },

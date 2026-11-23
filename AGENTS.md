@@ -21,9 +21,15 @@ are in `plugin/skills/`; after `init` they also live in the target repo's `.clau
    owns its promises (`services/payments/`). Each root gets its own `verification/`.
 3. In that folder:
    ```sh
-   python <kit>/verikit.py init --hook --ci github      # or --ci azure, or no --ci
+   python <kit>/verikit.py init --hook --ci github      # --ci azure, --ci both, or no --ci
    python verification/verikit.py doctor
    ```
+   In a monorepo, run `init --ci ...` in **each** root: the first writes the workflow, the next
+   ones add their root to its `# verikit:roots` list. For Azure Repos, tell the user to add the
+   pipeline as a *Build validation* branch policy (the YAML `pr:` trigger does not apply there).
+   `init` copies the skills into `.claude/skills/`. A team that prefers the Claude Code plugin
+   (`/plugin marketplace add eliasTuma/verikit`, then `/plugin install verikit@verikit`) can use
+   `init --no-skills` instead; do not install both, or each skill appears twice.
 4. Read `doctor`'s output: every project with its stack (.NET Framework vs .NET, legacy project
    format, React, Angular, Node backend) and test frameworks, plus missing tools. TLA+ needs
    Java 11+ or a running Docker; tell the user if neither exists.
@@ -69,6 +75,9 @@ python verification/verikit.py list                    # what exists, what is st
   from the root), do not delete it.
 - **The Stop hook blocked you:** run what it names. If a check passes but is stale, either
   re-confirm the model against the diff and `sync`, or say in your report that you did not.
+  (Recorded live: [docs/evidence/live-stop-hook.md](docs/evidence/live-stop-hook.md).)
+- **In CI:** `run --ci` picks the PR's target branch from GitHub Actions, Azure Pipelines or
+  GitLab and runs only the checks whose files changed; on a push, or a shallow clone, it runs all.
 
 ## 6. Hard rules
 
@@ -99,7 +108,10 @@ python verification/verikit.py list                    # what exists, what is st
 - [ ] If the service can run as several instances, the model has more than one, or `assumes`
       says "single instance" and the user confirmed it.
 - [ ] The CI workflow installs what the check needs (`npm ci` in the right folder, .NET SDK,
-      Windows runner for `net4x`).
+      Windows runner for `net4x`, Visual Studio/Build Tools for legacy projects) and its
+      `# verikit:roots` list includes this root.
+- [ ] A test filter that selects nothing cannot pass: you saw the check FAIL with its variant,
+      and the run output names the verification test (MSTest filters on `TestCategory=`).
 - [ ] `bounds` and `assumes` filled in honestly.
 - [ ] Committed, then `verikit sync <id>`, manifest committed.
 - [ ] Hand-off states: tool and why, bounds, result, variants caught, rerun command, what it leaves out.
@@ -120,11 +132,14 @@ python verification/verikit.py list                    # what exists, what is st
 - Keep `verikit.py` a **single file using only the standard library**; it is vendored into
   every target repo.
 - Before any change: `python -m unittest discover -s tests -v`. Before a PR, also
-  `python scripts/check_examples.py` and `python scripts/e2e.py` (need Node, .NET 8, Java or Docker).
-- A new stack = a runnable example in `examples/<name>/` with a `verification/verification.toml`
-  and at least one patch variant, an entry in `scripts/check_examples.py`, a
+  `python scripts/check_examples.py` and `python scripts/e2e.py` (need Node, .NET 8, Java or Docker;
+  Visual Studio or Build Tools for `dotnet-legacy`), and after CI template edits
+  `python scripts/check_ci_templates.py` (needs `pip install pyyaml jsonschema`).
+- A new stack = a runnable example in `examples/<name>/` with a `verification/verification.toml`,
+  at least one patch variant and an `example.toml` (setup, needed tools, OS), a job in
+  `.github/workflows/ci.yml` that names it (a named example that is SKIPPED fails), a
   `plugin/skills/verify-create/stacks/<name>.md`, and a row in the README support table.
-  Until it runs in `check_examples.py`, label it "template, not run".
+  Until that CI job is green, label it "template, not run".
 - Bump `VERSION` in `verikit.py` and `plugin/.claude-plugin/plugin.json`, and add a
   `CHANGELOG.md` entry. Target repos upgrade by re-running `init`.
 - Open work, in priority order: [docs/roadmap.md](docs/roadmap.md).

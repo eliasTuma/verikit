@@ -11,7 +11,7 @@ broken variants that must make them fail, and drift tracking.
 | xUnit | `[Trait("Category", "Verification")]` | `dotnet test <proj> --filter Category=Verification` |
 | NUnit | `[Category("Verification")]` | `dotnet test <proj> --filter Category=Verification` |
 | MSTest | `[TestCategory("Verification")]` | `dotnet test <proj> --filter TestCategory=Verification` |
-| legacy .NET Framework project | any of the above | `vstest.console.exe <dll> /TestCaseFilter:Category=Verification` |
+| legacy (non-SDK) .NET Framework project | MSTest `[TestCategory("Verification")]`, or a trait/category as above | `{python} verification/legacy_test.py <sln> <tests.dll> TestCategory=Verification` (MSBuild + vstest; copy it from `examples/dotnet-legacy`). Use `Category=` for xUnit/NUnit. Never `dotnet test` on the project: it runs nothing and exits 0 |
 | Vitest | `test('verification: ...')` | `npx vitest run -t verification` |
 | Jest | `test('verification: ...')` | `npx jest -t verification` |
 | Karma/Jasmine (Angular) | `*.verification.spec.ts` | `npx ng test --watch=false --include="**/*.verification.spec.ts"` |
@@ -41,9 +41,22 @@ reporter action, GitLab `artifacts:reports:junit`.
 
 ## Pull requests
 
-`verikit run --changed origin/main` runs only the checks whose covered files (or any
-verification file) changed relative to the PR base, plus uncommitted edits. Run everything on
-main or nightly.
+`verikit run --ci` reads the pull request's target branch from GitHub Actions, Azure Pipelines
+(Azure Repos or GitHub repos) or GitLab CI, and runs only the checks whose covered files (or any
+verification file) changed relative to it. On a push, or if the target branch cannot be diffed
+(a shallow clone), it runs every check - never none. `verikit run --changed origin/main` does the
+same with an explicit base. Run everything on main or nightly.
+
+The CI templates use `--ci`, run each verification root of a monorepo, and publish JUnit:
+
+| CI | `init` flag | Notes |
+|---|---|---|
+| GitHub Actions | `--ci github` | One matrix job per root. `fetch-depth: 0`. |
+| Azure Pipelines | `--ci azure` | One job runs every root (`${{ each }}`), then `PublishTestResults@2` (JUnit) fills the Tests tab. `fetchDepth: 0`. For **Azure Repos**, the YAML `pr:` trigger is not used: add the pipeline as a *Build validation* branch policy. |
+| both | `--ci both` | Writes both files. |
+
+Run `init --ci ...` again inside each other root of a monorepo: it adds that root to the
+`# verikit:roots` list in the existing workflow.
 
 ## Mutation testing
 

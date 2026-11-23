@@ -1119,9 +1119,12 @@ def classify_csproj(p: Path) -> tuple[str, list[str]]:
         kind.append(".NET Framework" + ("" if sdk else " (legacy project format)"))
     if modern:
         kind.append(".NET")
+    pkgs = _read(p.parent / "packages.config").lower()  # legacy projects list packages there
     tests = [n for n, pat in (("xUnit", "xunit"), ("NUnit", "nunit"), ("MSTest", "mstest"),
                               ("FsCheck", "fscheck"), ("CsCheck", "cscheck"), ("Coyote", "coyote"))
-             if pat in text.lower()]
+             if pat in text.lower() or pat in pkgs]
+    if pkgs:
+        tests.append("packages.config")
     return " + ".join(kind) or ".NET", [*tf, *tests]
 
 
@@ -1148,8 +1151,15 @@ def classify_package_json(p: Path) -> tuple[str, list[str]]:
 ROUTES = {
     ".NET": ("FsCheck / CsCheck property tests; Microsoft Coyote for async/concurrency",
              "dotnet test --filter Category=Verification"),
-    ".NET Framework": ("FsCheck (netstandard2.0) property tests; check Coyote's supported targets",
-                       "vstest.console.exe / dotnet test --filter Category=Verification (Windows)"),
+    ".NET Framework": ("FsCheck property tests in an SDK-style test project (TargetFrameworks net8.0;net48)",
+                       "dotnet test --filter Category=Verification (Windows for net4x)"),
+    ".NET Framework (legacy)": (
+        "FsCheck 2.x + FSharp.Core via packages.config, in the test framework the project already uses; "
+        "list new test files in the .csproj's <Compile> items",
+        "msbuild -restore -p:RestorePackagesConfig=true, then vstest.console.exe <tests.dll> "
+        "/TestCaseFilter:TestCategory=Verification (MSTest; an xUnit trait uses Category=) -- "
+        "RunConfiguration.TreatNoTestsAsError=true. Copy examples/dotnet-legacy/verification/legacy_test.py. "
+        "NOT `dotnet test` on the project: it runs no tests and exits 0"),
     "React": ("fast-check + Testing Library (fc.scheduler for click/response races)",
               "npx vitest run -t verification  /  npx jest -t verification"),
     "Angular": ("fast-check on services/stores (RxJS), Jasmine/Jest; component races via TestBed",
@@ -1195,7 +1205,8 @@ def cmd_doctor(args) -> int:
             print(f"  {kind:<34} {rel}" + (f"   [{', '.join(extra)}]" if extra else ""))
         if len(projects) > 200:
             print(f"  ... {len(projects) - 200} more")
-    kinds = {k.strip() for _, kind, _ in projects for k in kind.replace(" (legacy project format)", "").split("+")}
+    kinds = {k.strip().replace(" (legacy project format)", " (legacy)") for _, kind, _ in projects
+             for k in kind.split("+")}
     print("\nwhat fits:")
     print("  bad order of steps, any stack (retries, races, queues, sync, state machines)\n"
           "      -> TLA+ model + `verikit tlc` (needs Java 11+ or Docker)")
@@ -1214,6 +1225,17 @@ def cmd_doctor(args) -> int:
         path = shutil.which(exe)
         extra = (" (daemon up)" if _docker_ok() else " (daemon NOT running)") if exe == "docker" and path else ""
         print(f"  {'[x]' if path else '[ ]'} {exe:<8} {use}{extra}")
+    if ".NET Framework (legacy)" in kinds:
+        vswhere = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                       "Microsoft Visual Studio", "Installer", "vswhere.exe")
+        print(f"  {'[x]' if vswhere.is_file() else '[ ]'} vswhere  finds MSBuild 16.5+ and vstest.console for "
+              "legacy projects (Visual Studio or Build Tools)")
+        legacy_msbuild = shutil.which("msbuild")
+        if legacy_msbuild and "Microsoft.NET" in legacy_msbuild:
+            print(f"      note: `msbuild` on PATH is {legacy_msbuild} (MSBuild 4, cannot restore packages.config)")
+    if len(str(root)) > 110 and any(".NET Framework" in k for k in kinds):
+        print(f"\nwarning: this root's path is {len(str(root))} characters. .NET Framework test discovery "
+              "fails silently near 260, and packages/ adds about 140. Clone to a short path (C:\\src\\...).")
     vendored = root / "verification" / "verikit.py"
     if (root / MANIFEST_REL).exists():
         v = re.search(r'^VERSION = "([^"]+)"', _read(vendored), re.M) if vendored.exists() else None

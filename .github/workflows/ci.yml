@@ -20,6 +20,22 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
 
+  ci-templates:   # the GitHub and Azure templates, as `init --ci` writes them
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml==6.0.2 jsonschema==4.23.0
+      - run: python scripts/check_ci_templates.py
+      - name: actionlint (expressions and contexts in the GitHub workflows)
+        run: |
+          mkdir -p /tmp/lint/.github/workflows
+          python -c "import sys; sys.path.insert(0, '.'); import verikit, pathlib; t = pathlib.Path('templates/ci/github-actions.yml').read_text(); pathlib.Path('/tmp/lint/.github/workflows/verify.yml').write_text(verikit.set_ci_roots(t, ['services/api', 'web']))"
+          cp .github/workflows/ci.yml /tmp/lint/.github/workflows/
+          docker run --rm -v /tmp/lint:/repo -w /repo rhysd/actionlint:1.7.7 -color
+
   examples-linux:
     runs-on: ubuntu-latest
     steps:
@@ -51,4 +67,4 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
-      - run: python scripts/check_examples.py dotnet-checkout
+      - run: python scripts/check_examples.py dotnet-checkout dotnet-legacy   # legacy: VS MSBuild + vstest via vswhere
