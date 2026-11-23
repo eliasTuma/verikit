@@ -34,7 +34,8 @@ jobs:
           mkdir -p /tmp/lint/.github/workflows
           python -c "import sys; sys.path.insert(0, '.'); import verikit, pathlib; t = pathlib.Path('templates/ci/github-actions.yml').read_text(); pathlib.Path('/tmp/lint/.github/workflows/verify.yml').write_text(verikit.set_ci_roots(t, ['services/api', 'web']))"
           cp .github/workflows/ci.yml /tmp/lint/.github/workflows/
-          docker run --rm -v /tmp/lint:/repo -w /repo rhysd/actionlint:1.7.7 -color
+          docker run --rm -v /tmp/lint:/repo -w /repo rhysd/actionlint:1.7.7 -color \
+            .github/workflows/verify.yml .github/workflows/ci.yml
 
   examples-linux:
     runs-on: ubuntu-latest
