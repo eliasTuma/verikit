@@ -167,11 +167,14 @@ class Manifest(unittest.TestCase):
         finally:
             r.close()
 
-    def test_set_synced_commit(self):
-        text = '[[check]]\nid = "a"\nsynced_commit = ""\n[[check]]\nid = "b"\n'
-        out = verikit.set_synced_commit(text, "b", "abc123")
-        self.assertIn('id = "b"\nsynced_commit = "abc123"', out)
-        self.assertIn('id = "a"\nsynced_commit = ""', out)
+    def test_check_id_must_be_a_safe_file_name(self):
+        r = Repo(GOOD.replace('id = "guard"', 'id = "../guard"'))   # it names verification/sync/<id>.json
+        try:
+            code, out = vk("list", "--root", str(r.root))
+            self.assertEqual(code, 2)
+            self.assertIn("check id", out)
+        finally:
+            r.close()
 
 
 class RunAndPatches(unittest.TestCase):
@@ -285,12 +288,13 @@ class StaleChangedHook(unittest.TestCase):
         self.r.commit("edit")
         code, out = vk("stale", "--root", str(self.r.root), "--strict")
         self.assertEqual(code, 1)
-        self.assertIn("changed: svc/src/notes.txt", out)
+        self.assertIn("changed: src/notes.txt", out)
+        self.assertRegex(out, r"review:  git log -p [0-9a-f]{7,}\.\.HEAD")   # a base that is always reachable
 
     def test_list_is_fresh_right_after_sync(self):
         code, out = vk("list", "--root", str(self.r.root))
         self.assertEqual(code, 0, out)
-        self.assertIn("(synced)", out)
+        self.assertIn("sync:    synced", out)
         self.assertNotIn("code changed since", out)
         self.assertNotIn("last local pass: never", out)
 
@@ -307,7 +311,7 @@ class StaleChangedHook(unittest.TestCase):
         self.r.commit("edit harness")
         code, out = vk("stale", "--root", str(self.r.root), "--strict")
         self.assertEqual(code, 1)
-        self.assertIn("changed: svc/check.py", out)
+        self.assertIn("changed: check.py", out)
         self.assertIn("== guard", vk("run", "--root", str(self.r.root), "--changed")[1])
 
     def test_sync_keeps_crlf_line_endings(self):
@@ -333,26 +337,201 @@ class StaleChangedHook(unittest.TestCase):
         self.assertIn("== guard", out)
 
     def test_hook_blocks_then_warns_once_then_allows(self):
-        payload = json.dumps({"cwd": str(self.r.top)})
-
-        def hook(stdin: str) -> str | None:
-            """The block reason the hook hands Claude Code, or None when it lets the agent stop."""
-            code, out = vk("hook", stdin=stdin)
-            self.assertEqual(code, 0, out)
-            if not out.strip():
-                return None
-            decision = json.loads(out)
-            self.assertEqual(decision["decision"], "block")
-            return decision["reason"]
-
-        self.assertIsNone(hook(payload))                              # nothing changed
+        self.assertIsNone(hook(self.r.top, "SessionStart"))           # nothing stale to mention
+        self.assertIsNone(hook(self.r.top))                           # nothing changed
         (self.r.root / "src" / "notes.txt").write_text("x\n", encoding="utf-8")
         self.r.commit("edit")
-        self.assertIn("(in svc)", hook(payload))                      # unchecked edit: blocked
-        self.assertIsNone(hook(json.dumps({"cwd": str(self.r.top), "stop_hook_active": True})))
+        self.assertIn("(in svc)", hook(self.r.top))                   # unchecked edit: blocked
+        self.assertIsNone(hook(self.r.top, stop_hook_active=True))
         self.assertEqual(vk("run", "--root", str(self.r.root))[0], 0)
-        self.assertIn("describe the code at their sync commit", hook(payload))  # passes, model unconfirmed
-        self.assertIsNone(hook(payload))                              # warned once only
+        self.assertIn("sync record describes older content", hook(self.r.top))  # passes, model unconfirmed
+        self.assertIsNone(hook(self.r.top))                           # reminded once only
+
+    def test_editing_the_checks_own_model_files_is_drift(self):
+        patch = self.r.root / "verification" / "break.patch"
+        patch.write_bytes(patch.read_bytes() + b"\n")                 # stands for an edited model or mutant
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1, out)
+        self.assertIn("changed: verification/break.patch", out)
+
+
+def hook(cwd: Path, event: str = "Stop", session: str = "s1", **extra) -> str | None:
+    """Run the Claude Code hook; return the block reason (Stop) or the context text
+    (SessionStart), or None when it says nothing."""
+    code, out = vk("hook", stdin=json.dumps({"cwd": str(cwd), "hook_event_name": event,
+                                             "session_id": session, **extra}))
+    assert code == 0, out
+    out = "\n".join(line for line in out.splitlines() if not line.startswith("verikit: warning"))
+    if not out.strip():
+        return None
+    if event == "Stop":
+        decision = json.loads(out)
+        assert decision["decision"] == "block", out
+        return decision["reason"]
+    return out
+
+
+class SyncSurvivesHistoryRewrites(unittest.TestCase):
+    """The recorded sync must not depend on a commit staying reachable: squash and rebase
+    merges throw the branch's commits away, and CI often clones without history."""
+
+    def setUp(self):
+        self.r = Repo(GOOD)
+        self.r.make_patch()
+
+    def tearDown(self):
+        self.r.close()
+
+    def feature_synced_then_merged(self, how: str) -> None:
+        git(self.r.top, "checkout", "-q", "-b", "feature")
+        (self.r.root / "src" / "notes.txt").write_text("feature work\n", encoding="utf-8")
+        self.r.commit("feature work")
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        self.r.commit("sync")
+        git(self.r.top, "checkout", "-q", "main")
+        if how == "squash":
+            git(self.r.top, "merge", "-q", "--squash", "feature")
+            git(self.r.top, "commit", "-qm", "feature (squashed)")
+        else:  # rebase: same content, new commit ids
+            (self.r.top / "README.md").write_text("main moved on\n", encoding="utf-8")
+            self.r.commit("unrelated change on main")
+            git(self.r.top, "checkout", "-q", "feature")
+            git(self.r.top, "rebase", "-q", "main")
+            git(self.r.top, "checkout", "-q", "main")
+            git(self.r.top, "merge", "-q", "--ff-only", "feature")
+        git(self.r.top, "branch", "-q", "-D", "feature")
+
+    def fresh_clone(self, *clone_args: str) -> Path:
+        dest = self.r.tmp.parent / (self.r.tmp.name + "-clone")
+        self.addCleanup(rmtree, dest)
+        if dest.exists():
+            rmtree(dest)
+        git(self.r.tmp.parent, "clone", "-q", "--no-local", *clone_args, self.r.top.as_uri(), str(dest))
+        return dest
+
+    def assert_synced_and_quiet(self, clone: Path) -> None:
+        code, out = vk("stale", "--root", str(clone / "svc"), "--strict")
+        self.assertEqual(code, 0, out)
+        self.assertIn("synced", out)
+        self.assertNotIn("unknown", out)
+        self.assertIsNone(hook(clone, "SessionStart"))        # nothing stale to mention
+        self.assertIsNone(hook(clone))                        # and nothing to block
+
+    def test_squash_merge_then_fresh_clone(self):
+        self.feature_synced_then_merged("squash")
+        self.assert_synced_and_quiet(self.fresh_clone())
+
+    def test_rebase_merge_then_fresh_clone(self):
+        self.feature_synced_then_merged("rebase")
+        self.assert_synced_and_quiet(self.fresh_clone())
+
+    def test_shallow_clone_needs_no_history(self):
+        self.feature_synced_then_merged("squash")
+        self.assert_synced_and_quiet(self.fresh_clone("--depth", "1"))
+
+    def test_sync_does_not_rewrite_the_manifest_and_merges_cleanly(self):
+        manifest = self.r.root / "verification" / "verification.toml"
+        before = manifest.read_bytes()
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        self.assertEqual(manifest.read_bytes(), before)
+        record = self.r.root / "verification" / "sync" / "guard.json"
+        self.assertTrue(record.is_file())                     # under verification/: CODEOWNERS covers it
+        self.assertNotIn(b"\r\n", record.read_bytes())
+
+    def test_crlf_and_lf_checkouts_record_the_same_content(self):
+        notes = self.r.root / "src" / "notes.txt"
+        notes.write_bytes(b"first line\nsecond line\n")
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        notes.write_bytes(b"first line\r\nsecond line\r\n")    # the same commit checked out with autocrlf
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 0, out)
+
+    def test_wording_edits_in_the_manifest_do_not_make_a_check_stale(self):
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        manifest = self.r.root / "verification" / "verification.toml"
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace("guard removed", "the guard is removed"),
+                            encoding="utf-8")
+        self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
+
+    def test_generated_ignored_files_do_not_count_as_covered(self):
+        (self.r.top / ".gitignore").write_text("obj/\n", encoding="utf-8")
+        self.r.commit("ignore obj")
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        (self.r.root / "src" / "obj").mkdir()
+        (self.r.root / "src" / "obj" / "generated.txt").write_text("build output\n", encoding="utf-8")
+        self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
+
+    def test_record_from_0_3_is_still_read_and_never_assumed_synced(self):
+        sha = git(self.r.top, "rev-parse", "--short=12", "HEAD").strip()
+        manifest = self.r.root / "verification" / "verification.toml"
+        text = manifest.read_text(encoding="utf-8")
+        manifest.write_text(text.replace('synced_commit = ""', f'synced_commit = "{sha}"'), encoding="utf-8")
+        self.r.commit("0.3-style sync")
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 0, out)                        # reachable and unchanged: synced
+        manifest.write_text(text.replace('synced_commit = ""', 'synced_commit = "0123456789ab"'), encoding="utf-8")
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1, out)                        # unreachable: unknown, with the way out
+        self.assertIn("unknown", out)
+        self.assertIn("sync guard", out)
+
+
+class HookBlamesOnlyItsSession(unittest.TestCase):
+    def setUp(self):
+        self.r = Repo(GOOD)
+        self.r.make_patch()
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        self.r.commit("sync")
+
+    def tearDown(self):
+        self.r.close()
+
+    def teammate_drift(self) -> None:
+        (self.r.root / "src" / "notes.txt").write_text("a teammate's merged change\n", encoding="utf-8")
+        self.r.commit("teammate change, no sync")
+        shutil.rmtree(self.r.root / ".verikit", ignore_errors=True)   # as in a fresh clone
+
+    def test_drift_already_on_main_is_mentioned_once_not_blamed(self):
+        self.teammate_drift()
+        note = hook(self.r.top, "SessionStart")
+        self.assertIn("guard", note)
+        self.assertIn("before this session", note)
+        self.assertIsNone(hook(self.r.top))                   # this session edited nothing
+        self.assertIsNone(hook(self.r.top, "SessionStart", source="compact"))  # baseline kept, no repeat
+
+    def test_session_that_edits_and_commits_covered_code_is_blocked(self):
+        self.assertIsNone(hook(self.r.top, "SessionStart"))
+        (self.r.root / "src" / "notes.txt").write_text("the agent's edit\n", encoding="utf-8")
+        self.r.commit("agent commits its edit")               # committing must not hide it
+        reason = hook(self.r.top)
+        self.assertIn("This session changed", reason)
+        self.assertIn("run guard", reason)
+        self.assertIsNone(hook(self.r.top, stop_hook_active=True))
+        self.assertEqual(vk("run", "--root", str(self.r.root))[0], 0)
+        self.assertIn("sync guard", hook(self.r.top))         # passes; the record is not updated yet
+        self.assertIsNone(hook(self.r.top))                   # said once
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        self.assertIsNone(hook(self.r.top, session="s2"))
+
+    def test_edit_on_top_of_old_drift_is_this_sessions(self):
+        self.teammate_drift()
+        hook(self.r.top, "SessionStart")
+        (self.r.root / "src" / "app.txt").write_text("guard = on\n# touched\n", encoding="utf-8")
+        self.assertIn("This session changed", hook(self.r.top))
+
+    def test_without_a_session_baseline_drift_is_reported_not_let_through(self):
+        self.teammate_drift()                                 # no SessionStart ran (hook installed mid-session)
+        reason = hook(self.r.top)
+        self.assertIn("guard", reason)
+        self.assertNotIn("This session changed", reason)      # cannot know whose edit it is
+        self.assertIn("earlier change", reason)
+
+    def test_unsynced_check_edited_by_the_session_is_blocked(self):
+        (self.r.root / "verification" / "sync" / "guard.json").unlink()
+        self.r.commit("never synced")
+        hook(self.r.top, "SessionStart")
+        (self.r.root / "src" / "notes.txt").write_text("edit\n", encoding="utf-8")
+        self.assertIn("This session changed", hook(self.r.top))
 
 
 CI_VARS = ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "TF_BUILD", "BUILD_REASON",
@@ -466,9 +645,8 @@ class CrossRepo(unittest.TestCase):
         git(self.web, "commit", "-qm", msg)
 
     def test_sync_records_the_other_repos_commit(self):
-        sha = git(self.web, "rev-parse", "--short=12", "HEAD").strip()
-        text = (self.r.root / "verification" / "verification.toml").read_text(encoding="utf-8")
-        self.assertIn(f'synced_sources = {{ web = "{sha}" }}', text)
+        record = json.loads((self.r.root / "verification" / "sync" / "guard.json").read_text(encoding="utf-8"))
+        self.assertIn("web:src/pay.ts", record["files"])            # content, not a commit of that repo
         code, out = vk("stale", "--root", str(self.r.root), "--strict")
         self.assertEqual(code, 0, out)
         self.assertIn("web", vk("list", "--root", str(self.r.root))[1])
@@ -482,16 +660,17 @@ class CrossRepo(unittest.TestCase):
         self.assertIn("== guard", vk("run", "--root", str(self.r.root), "--changed")[1])
         base = git(self.r.top, "rev-parse", "HEAD").strip()     # a PR in repo A that touches nothing
         self.assertIn("== guard", vk("run", "--root", str(self.r.root), "--changed", base)[1])
-        reason = json.loads(vk("hook", stdin=json.dumps({"cwd": str(self.r.top)}))[1])["reason"]
-        self.assertIn("guard", reason)
+        self.assertIn("guard", hook(self.r.top, session="no-baseline"))
         self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
         self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
 
-    def test_untracked_or_uncommitted_edit_in_other_repo_blocks_sync(self):
+    def test_uncommitted_edit_in_other_repo_is_drift_too(self):
         (self.web / "src" / "pay.ts").write_text("export const pay = 3;\n", encoding="utf-8")
-        code, out = vk("sync", "guard", "--root", str(self.r.root))
-        self.assertEqual(code, 2)
-        self.assertIn("web", out)
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1, out)
+        self.assertIn("changed: web:src/pay.ts", out)
+        (self.web / "src" / "new.ts").write_text("export const more = 1;\n", encoding="utf-8")   # untracked
+        self.assertIn("changed: web:src/new.ts", vk("stale", "--root", str(self.r.root))[1])
 
     def test_missing_checkout_is_unknown_never_synced(self):
         moved = self.web.with_name(self.web.name + "-moved")
@@ -502,7 +681,7 @@ class CrossRepo(unittest.TestCase):
         self.assertIn("unknown", out)
         self.assertIn("VERIKIT_SOURCE_WEB", out)
         # a developer without the other repo is not blocked by the hook for that alone
-        self.assertEqual(vk("hook", stdin=json.dumps({"cwd": str(self.r.top)}))[1].strip(), "")
+        self.assertIsNone(hook(self.r.top, session="no-baseline"))
         with mock.patch.dict(os.environ, {"VERIKIT_SOURCE_WEB": str(moved)}):
             self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
 
@@ -571,6 +750,29 @@ class Init(unittest.TestCase):
             self.assertEqual(code, 0)
             settings = json.loads((r.top / ".claude" / "settings.json").read_text(encoding="utf-8"))
             self.assertEqual(len(settings["hooks"]["Stop"]), 1)
+        finally:
+            r.close()
+
+    def test_init_upgrades_a_0_3_hook_without_duplicating(self):
+        r = Repo(GOOD)
+        try:
+            settings = r.top / ".claude" / "settings.json"
+            settings.parent.mkdir()
+            old = 'python "${CLAUDE_PROJECT_DIR}/svc/verification/verikit.py" hook'
+            settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": old, "timeout": 60}]}]}}), encoding="utf-8")
+            code, out = vk("init", "--root", str(r.root), "--hook", "--no-skills")
+            self.assertEqual(code, 0, out)
+            hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+            commands = [h["command"] for event in ("SessionStart", "Stop") for e in hooks[event] for h in e["hooks"]]
+            self.assertEqual(len(commands), 2, hooks)             # one per event, the old entry replaced
+            self.assertEqual(commands[0], commands[1])
+            script = '"${CLAUDE_PROJECT_DIR}/svc/verification/verikit.py"'
+            self.assertEqual(commands[0], f'if python3 -c "" >/dev/null 2>&1; then python3 {script} hook; '
+                                          f'else python {script} hook; fi')
+            before = settings.read_bytes()
+            vk("init", "--root", str(r.root), "--hook", "--no-skills")
+            self.assertEqual(settings.read_bytes(), before)       # idempotent
         finally:
             r.close()
 

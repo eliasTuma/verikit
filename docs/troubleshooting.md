@@ -12,9 +12,12 @@
 | `patch ... applied but changed no file` | Patch paths are relative to the git top level, not the verification root | Regenerate it from the verification root |
 | `reverted broken-variant patch ... left applied` | A previous run was interrupted | Nothing to do; verikit restored the files. Check `git diff` if unsure. |
 | `[error] ... an action contradicts itself` | A TLA+ action sets a variable it also lists as UNCHANGED | Fix the action; the pass was vacuous |
-| The Stop hook blocks | Covered code changed and no passing run has seen it, or a passing check is stale | Run the named check, or re-confirm and `sync`. It never blocks twice in a row. |
-| Hook does nothing on Windows without Git Bash | Hooks then run in PowerShell | The `${CLAUDE_PROJECT_DIR}` form that `init` writes works in both shells; re-run `init --hook` if it was edited |
-| `stale` shows `unknown` | The sync commit is not in local history (shallow clone) | Use `fetch-depth: 0` (GitHub) / `fetchDepth: 0` (Azure) in CI |
+| The Stop hook blocks | This session changed covered code and no passing run has seen it, or a passing check's sync record is older than the code | Run the named check, or re-confirm and `sync`. It never blocks twice in a row. |
+| The hook never runs on macOS or Linux (0.3.0) | The 0.3.0 hook command called `python`, which many machines do not have | Re-run `init --hook` with 0.3.1+: the command tries `python3` first, then `python` |
+| Hook error "verikit needs Python 3.11 or newer" | The machine's `python3` is older | Install Python 3.11+ and put it first on PATH |
+| Hook fails to parse on Windows without Git Bash | Claude Code then runs hooks in PowerShell, and PowerShell cannot parse the `if ...; then ...; fi` form | Install Git for Windows (verikit needs git anyway; Claude Code then uses Git Bash), or shorten the command in `.claude/settings.json` to `python "${CLAUDE_PROJECT_DIR}/verification/verikit.py" hook` |
+| `stale` shows `unknown` with "recorded by verikit 0.3 as commit ..." | A 0.3 manifest stores a commit id, and a squash merge, rebase or shallow clone made it unreachable | Run `verikit sync <id>` once with 0.3.1+: it records content in `verification/sync/<id>.json` instead. Delete the old `synced_commit` line |
+| `stale` shows `unknown` with "missing source" | A check covers files in another repository that is not checked out here | Clone it at the manifest's `path`, or set `VERIKIT_SOURCE_<NAME>` |
 | First TLA+ run is slow | Docker image pull and jar download | Cached afterwards in `~/.cache/verikit` (`VERIKIT_CACHE`) |
 | `--ci: ... missing or shares no history with HEAD ... Running every check instead` | Shallow checkout, or the target branch was not fetched | Set `fetch-depth: 0` / `fetchDepth: 0`. verikit still runs every check, so nothing is skipped; it is only slower |
 | Azure Repos: no build on pull requests | The YAML `pr:` trigger does not apply to Azure Repos | Add the pipeline as a *Build validation* branch policy on the target branch |

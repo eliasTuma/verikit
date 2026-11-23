@@ -15,7 +15,6 @@ assumes = [
   "The payment provider charges at most once per idempotency key, atomically.",
   "Declined cards and provider errors are out of scope (no action models them).",
 ]
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: every retry sends a different idempotency key"
@@ -39,7 +38,6 @@ covers = ["src/checkout.js"]
 harness = ["test/checkout.race.test.js"]
 bounds = "400 random schedules per run, maxRetries 0..3; sampling, not exhaustive"
 assumes = ["The fake provider deduplicates by idempotency key, as real providers document."]
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: the idempotency key is created inside the retry loop"

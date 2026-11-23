@@ -100,7 +100,9 @@ def main() -> int:
         must(sh(["git", "status", "--porcelain"], repo).strip() == "", "patch variant reverted; tree clean")
 
         out = sh([*vk, "sync", "checkout-design", "checkout-code", "--seed", "7"], svc)
-        sh(["git", "commit", "-qam", "sync verification"], repo)
+        must((svc / "verification" / "sync" / "checkout-code.json").exists(), "sync wrote a record per check")
+        sh(["git", "add", "-A"], repo)
+        sh(["git", "commit", "-qm", "sync verification"], repo)
         out = sh([*vk, "stale"], svc)
         must(out.count("synced ") == 2, "both checks synced", out)
         must("no check covers a changed file" in sh([*vk, "run", "--changed"], svc), "--changed runs nothing when nothing changed")

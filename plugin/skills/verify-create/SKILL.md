@@ -129,8 +129,8 @@ Windows runner for `net4x` tests). Then:
 python verification/verikit.py run <id>
 ```
 
-- **Holds and every must_fail fails:** commit, then `python verification/verikit.py sync <id>`
-  and commit the manifest.
+- **Holds and every must_fail fails:** `python verification/verikit.py sync <id>`, then commit
+  the check together with its sync record (`verification/sync/<id>.json`).
 - **Fails on the current code:** that is a finding. Replay the counterexample against the
   real code step by step. If every step can happen, report it in the code's words with the
   harm. Do not weaken the rule or the model, and do not change product code unless asked.

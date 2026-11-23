@@ -14,7 +14,6 @@ harness = ["Billing.Tests/CheckoutVerificationTests.cs"]
 bounds = "500 generated schedules, maxRetries 0..3; sampling, not exhaustive"
 assumes = ["The payment gateway charges at most once per idempotency key (the fake models this)."]
 timeout = 900
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: the idempotency key is built per attempt"

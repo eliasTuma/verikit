@@ -15,7 +15,7 @@ tests inside your own test projects), with proof that every check can actually f
 It is a small Python runner (stdlib only), three agent skills (also installable as a Claude
 Code plugin), seven runnable examples for .NET (including legacy .NET Framework and Coyote),
 Node, React and Angular, and CI templates for GitHub Actions and Azure Pipelines. Version
-**0.3.0**; see [what has been tested](#supported-stacks).
+**0.3.1**; see [what has been tested](#supported-stacks).
 
 ---
 
@@ -43,8 +43,8 @@ performance. Keep your tests; this is for the promises they cannot reach.
 3. **A check you have never seen fail proves nothing.** Every check lists `must_fail`
    variants - a patch that removes a guard, a model constant that disables it, a witness that
    the good thing can happen at all. `verikit run` fails if any of them *passes*.
-4. **Record what it covers.** Each check names its files and the commit where it last matched
-   the code. `verikit stale` flags drift; `/verify-maintain` decides drift vs. real bug.
+4. **Record what it covers.** Each check names its files, and `verikit sync` records the content
+   it was last confirmed against. `verikit stale` flags drift; `/verify-maintain` decides drift vs. real bug.
 5. **Enforce it.** CI runs the checks whose code changed on every PR and reports JUnit like
    your tests. A Stop hook keeps agents from finishing with unchecked edits.
 
@@ -94,7 +94,7 @@ python verification/verikit.py doctor                         # projects, stacks
 
 # 4. every day
 python verification/verikit.py run --changed          # checks whose covered code changed
-python verification/verikit.py stale                  # drift since each sync commit
+python verification/verikit.py stale                  # checks whose code changed since their last sync
 /verify-maintain                                      # after merges that skipped the checks
 ```
 
@@ -120,7 +120,7 @@ machine has the tools for.
   whole kit into a product repo; `init` vendors only what is needed.
 - **Hard rules:** never weaken a rule or a model to make a check pass; report the
   counterexample instead. Do not change product code while creating or maintaining checks
-  unless the user asks. Every `must_fail` needs a `match`. Never set `synced_commit` by hand.
+  unless the user asks. Every `must_fail` needs a `match`. Never edit a sync record (`verification/sync/<id>.json`) by hand.
 - **`verikit run` temporarily edits product files** to apply broken-variant patches, then
   restores them byte for byte from backups in `.verikit/` (also on the next start, if a run was
   interrupted). Still, do not run it on a working tree with unrelated uncommitted edits to the same files.
@@ -140,12 +140,12 @@ machine has the tools for.
 | `doctor [--depth N]` | Lists every project (.NET Framework vs .NET, legacy project format, React, Angular, Node backend...), its test frameworks, the tools installed, and what fits. | 0 |
 | `init [--hook] [--ci github,azure\|both] [--no-skills] [--force]` | Scaffolds `verification/` in the current folder (monorepo-aware); in another root, adds that root to the existing CI workflow. | 0 / 2 |
 | `run [ID...] [--tag T] [--changed [REF] \| --ci] [--junit F] [--json F] [--seed N]` | Each check must pass; each `must_fail` must fail with its `match`. `--ci` = in a PR build (GitHub Actions, Azure Pipelines, GitLab) only the checks whose files changed vs the target branch, else all. `--changed REF` = vs `REF...HEAD`; bare `--changed` = vs each sync commit. The seed is exported as `VERIKIT_SEED`. | 0 / 1 / 2 |
-| `stale [--strict]` | Checks whose covered files changed since `synced_commit`. | 0 / 1 |
-| `sync ID...` | Refuses with uncommitted covered files; reruns; records HEAD. | 0 / 1 / 2 |
+| `stale [--strict]` | Checks whose covered content differs from what their last `sync` recorded. Needs no git history: it survives squash merges, rebases and shallow clones. | 0 / 1 |
+| `sync ID...` | Reruns the check, then records the content it confirmed in `verification/sync/<id>.json` (commit it with your change). | 0 / 1 / 2 |
 | `list [--tag T]` | Rule, harm, covers, bounds, variants, sync state, last local pass. | 0 |
 | `tlc SPEC.tla [-c CFG] [--const K=V] [--inv NAME]` | TLC on local Java, else Docker. Shortest counterexample as per-step changes; TLC warnings surfaced; a self-contradicting action is an error (vacuous pass). | 0 / 1 / 2 |
 | `explore MODEL.py` | Breadth-first explorer for small Python models; zero install. | 0 / 1 / 2 |
-| `hook` | Claude Code Stop hook: blocks (JSON `decision: block`) while edited covered code is unchecked; warns once when a passing check describes older code; never blocks twice in a row. | 0 |
+| `hook` | Claude Code hook for SessionStart and Stop. Blocks (JSON `decision: block`) while covered code **this session** changed is unchecked; reminds once when a passing check's sync record is older than the code; lists checks that were already out of date when the session began instead of blaming the agent; never blocks twice in a row. | 0 |
 
 Exit codes: 0 = holds, 1 = a property or check failed, 2 = tool or setup error.
 
@@ -164,7 +164,6 @@ covers = ["src/Payments/**/*.cs", "web/src/app/checkout/**/*.ts"]   # backend AN
 bounds = "1 order, up to 3 attempts"
 assumes = ["The provider charges at most once per idempotency key."]
 timeout = 900
-synced_commit = ""                                 # written by `verikit sync`
 
   [[check.must_fail]]
   why = "Broken variant: a fresh idempotency key on every retry"

@@ -31,7 +31,8 @@ call was slow, not dead; it lands, the retry lands, and the customer is charged 
 4. **Findings stay findings.** When the current code breaks the rule, report the counterexample
    in the code's words. Do not weaken the rule or the model until it passes.
 5. **Keep the check in step with the code.** Each check records the files it describes and the
-   commit at which it was last confirmed to describe them. A model does not see code changes:
+   content it was last confirmed against (`verification/sync/<id>.json`; content, not a commit
+   id, so squash merges and shallow clones cannot invalidate it). A model does not see code changes:
    a model check keeps passing after someone breaks the code. So pair design checks with code
    checks, flag drift (`stale`), and re-confirm models after changes (`/verify-maintain`).
 6. **Few promises, chosen well.** 3-10 per product, where a bug costs the most and tests reach

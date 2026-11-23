@@ -13,7 +13,6 @@ covers = ["src/PayButton.jsx"]
 harness = ["test/PayButton.verification.test.jsx"]
 bounds = "200 runs; 1-4 bursts of 1-2 same-tick clicks interleaved with server replies; sampling"
 assumes = ["api.pay is the only way the component starts a payment."]
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: guard on React state instead of a ref (misses two clicks in one tick)"

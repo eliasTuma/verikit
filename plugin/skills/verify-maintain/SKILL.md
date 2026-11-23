@@ -1,6 +1,6 @@
 ---
 name: verify-maintain
-description: Bring the checks in verification/verification.toml back in line after the code changed - find what changed since each check's sync commit, update the model or harness from the code, rerun, and say whether each failure is drift in the verification or a bug in the code. Use for /verify-maintain, "is the model still true to the code", or after merges and refactors that touched covered files.
+description: Bring the checks in verification/verification.toml back in line after the code changed - find what changed since each check's last sync, update the model or harness from the code, rerun, and say whether each failure is drift in the verification or a bug in the code. Use for /verify-maintain, "is the model still true to the code", or after merges and refactors that touched covered files.
 ---
 
 # Maintain verified promises
@@ -16,13 +16,16 @@ a rule to make it pass.
 ## Steps
 
 1. **Find what is stale.** `python verification/verikit.py stale` lists each check whose
-   covered files changed since its `synced_commit`, with the files. `list` shows rule,
+   covered content differs from what its last `sync` recorded (`verification/sync/<id>.json`),
+   with the files, and prints a `review:` line with the commit to read from. `list` shows rule,
    bounds and assumptions. In a monorepo, each service folder that holds a `verification/`
    is its own root: run the commands from inside it (or pass `--root`).
 2. **Run it as it is**, before changing anything: `python verification/verikit.py run <id>`.
    Record the result. A pass only says the old description still holds.
 3. **Read every change to covered code and to the check's harness:**
-   `git log -p <synced_commit>..HEAD -- <covers> <harness>`. A harness change that weakens the
+   `git log -p <base>..HEAD -- <the changed files>`, where `<base>` is the commit on the
+   `review:` line (the last commit that changed the check's sync record; it is always in this
+   branch's history, also after squash merges). A harness change that weakens the
    check (looser assertion, fewer runs, a removed scenario) needs the user's approval, like a
    rule change.
    Look for moved or renamed code too, and new code that writes the state the rule guards
@@ -43,9 +46,10 @@ a rule to make it pass.
    - Fail: replay the counterexample on the real code. A step the code cannot take means the
      model is wrong - fix it and say what was wrong. If every step can happen, it is a bug:
      name the commit that introduced it, tell the steps in the code's words, state the harm.
-6. **Sync.** Commit the verification change on its own (separate from any product fix),
-   then `python verification/verikit.py sync <id>` and commit the manifest. Do not sync a
-   check that is blocked or failing.
+6. **Sync.** `python verification/verikit.py sync <id>` reruns the check on the content on
+   disk and records that content in `verification/sync/<id>.json`. Commit that file together
+   with the verification change (keep product fixes in their own commit). Never edit a sync
+   record by hand, and do not sync a check that is blocked or failing.
 
 ## Report, per check
 

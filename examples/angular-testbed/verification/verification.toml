@@ -17,7 +17,6 @@ assumes = [
   "Nothing sits between the input and HttpClient that changes timing (no debounce, retry or cache in this code).",
   "Every request succeeds; error replies are not exercised.",
 ]
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: mergeMap instead of switchMap (the old request stays alive, so its reply can land after a newer query)"

@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # --ci and stale need history back to the base and sync commits
+          fetch-depth: 0            # --ci diffs against the pull request's base branch
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

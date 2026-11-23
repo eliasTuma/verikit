@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.1 - 2026-11-24
+
+Two bugs that broke the kit in an ordinary team workflow, plus one portability bug. Upgrade by
+re-running `init --hook` in each repo, then `verikit sync <id>` once per check.
+
+- **Sync no longer depends on a commit staying reachable.** 0.3 stored a commit id per check;
+  a squash merge, a rebase or a shallow clone made it unreachable, so every check showed as
+  `unknown` in CI and for teammates. `sync` now records the *content* it confirmed, in
+  `verification/sync/<id>.json` (one small file per check: it merges without conflicts, sits
+  under CODEOWNERS, and stores per-file digests so `stale` can still name what changed).
+  Line endings are normalised, git-ignored build output is not counted, wording edits in the
+  manifest are not drift, and edits to the check's own model or mutants are. `sync` no longer
+  rewrites the manifest and no longer needs a clean tree: sync, then commit once. `stale` prints
+  a `review:` commit that is always in the branch's history. 0.3 manifests are still read; an
+  unreachable `synced_commit` is `unknown` with the command that fixes it. Cross-repo checks
+  record content the same way (`synced_sources` is gone).
+- **The Stop hook blames only its own session.** It used to say "You changed code" to an agent
+  that had edited nothing, whenever a check was already stale (a teammate's merge, or the bug
+  above). `init --hook` now also registers SessionStart, which records each check's content
+  when the session begins; Stop blocks only for what changed since. Checks that were already
+  out of date are listed once at session start. Without a baseline the hook still reports
+  drift, worded as "this session's edits or an earlier change". An edit to a never-synced
+  check's code is now blocked too.
+- **Hook command works where only `python3` exists** (macOS, many Linux machines): it tries
+  `python3`, then `python`. The 0.3.0 command failed there with "python: not found". Checked
+  in a python3-only Linux container and in Git Bash on Windows. A clear message replaces the
+  import error on Python older than 3.11. `init --hook` upgrades an existing 0.3 entry in place.
+
 ## 0.3.0 - 2026-11-23
 
 New examples, all run through `verikit run` with every broken variant caught:

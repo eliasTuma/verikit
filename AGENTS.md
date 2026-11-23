@@ -75,6 +75,9 @@ python verification/verikit.py list                    # what exists, what is st
   from the root), do not delete it.
 - **The Stop hook blocked you:** run what it names. If a check passes but is stale, either
   re-confirm the model against the diff and `sync`, or say in your report that you did not.
+  The hook records each check's content when your session starts, so it blocks only for
+  what this session changed. Checks that were already out of date are listed once at the
+  start of the session: leave them unless your task touches their code, and mention them.
   (Recorded live: [docs/evidence/live-stop-hook.md](docs/evidence/live-stop-hook.md).)
 - **In CI:** `run --ci` picks the PR's target branch from GitHub Actions, Azure Pipelines or
   GitLab and runs only the checks whose files changed; on a push, or a shallow clone, it runs all.
@@ -87,7 +90,8 @@ python verification/verikit.py list                    # what exists, what is st
    checks are part of the job; say in the hand-off which ones you changed.
 3. Every check has at least one `must_fail`; every model has a reachability witness; every
    guard has its own broken variant; every `must_fail` has a `match` that names the rule.
-4. Never set `synced_commit` by hand. Only `verikit sync` writes it, and only after a pass.
+4. Never write or edit a sync record (`verification/sync/<id>.json`) by hand. Only
+   `verikit sync` writes it, and only after a pass. Commit it with the change it confirms.
 5. A rule is a product decision. Show the rule, the harm and the gaps to the user; changes to
    `verification/` should go through human review (CODEOWNERS).
 6. Say what was **not** verified: bounds, assumptions, sampled vs exhaustive, sides not covered.
@@ -113,7 +117,7 @@ python verification/verikit.py list                    # what exists, what is st
 - [ ] A test filter that selects nothing cannot pass: you saw the check FAIL with its variant,
       and the run output names the verification test (MSTest filters on `TestCategory=`).
 - [ ] `bounds` and `assumes` filled in honestly.
-- [ ] Committed, then `verikit sync <id>`, manifest committed.
+- [ ] `verikit sync <id>` run, and `verification/sync/<id>.json` committed with the check.
 - [ ] Hand-off states: tool and why, bounds, result, variants caught, rerun command, what it leaves out.
 
 ## 8. Taking it further

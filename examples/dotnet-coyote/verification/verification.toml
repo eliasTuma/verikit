@@ -24,7 +24,6 @@ assumes = [
   "Only the product and test dlls are rewritten; anything Coyote cannot control is reported as an error, not skipped.",
 ]
 timeout = 600
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: no SemaphoreSlim, so read-check-write of two requests can interleave (the classic check-then-act race)"

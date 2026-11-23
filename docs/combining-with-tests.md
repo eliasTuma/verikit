@@ -71,13 +71,12 @@ path = "../storefront-web"          # where that repo is checked out, relative t
 id = "pay-once"
 covers = ["src/Payments/**/*.cs", "web:src/app/checkout/**/*.ts"]   # name:glob = in that repo
 harness = ["web:src/app/checkout/pay.verification.spec.ts"]
-synced_commit = "..."               # this repo, written by `verikit sync`
-synced_sources = { web = "..." }    # the other repo's commit at the same sync, also written by sync
 ```
 
-- `stale`, `run --changed`, `run --ci` and the Stop hook see a change in the other repository
-  as drift, measured from the commit `sync` recorded for it.
-- `sync` refuses while covered files in the other repository have uncommitted edits.
+- `sync` records the content of the covered files in both repositories in
+  `verification/sync/<id>.json`. `stale`, `run --changed`, `run --ci` and the Stop hook see any
+  later change in the other repository as drift, committed or not. No commit ids are stored, so
+  the other repository can squash, rebase or be cloned shallow.
 - A missing checkout makes the check `unknown`, which fails `stale --strict` (never `synced`).
   The Stop hook does not block a developer who simply has not cloned the other repo.
 - Override the path with `VERIKIT_SOURCE_WEB=<path>` (CI often checks it out elsewhere). Run

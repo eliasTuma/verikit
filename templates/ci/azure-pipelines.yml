@@ -26,7 +26,7 @@ variables:
 
 steps:
   - checkout: self
-    fetchDepth: 0            # --ci and stale need history back to the target and sync commits
+    fetchDepth: 0            # --ci diffs against the pull request's target branch
   - task: UsePythonVersion@0
     inputs:
       versionSpec: "3.12"

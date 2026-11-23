@@ -14,7 +14,6 @@ harness = ["tests/Checkout.Tests/CheckoutVerificationTests.cs"]
 bounds = "500 generated schedules per target framework, maxRetries 0..3; sampling, not exhaustive"
 assumes = ["The provider charges at most once per idempotency key (the fake models this)."]
 timeout = 900
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: the idempotency key is built per attempt"

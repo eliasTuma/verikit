@@ -25,6 +25,11 @@ Needs Python 3.11+ (stdlib only) and git. TLA+ checks also need Java 11+ or Dock
 """
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 11):  # before `import tomllib`, so an old interpreter gets a clear message
+    sys.exit("verikit needs Python 3.11 or newer (this is %d.%d)" % sys.version_info[:2])
+
 import argparse
 import ast
 import hashlib
@@ -35,7 +40,6 @@ import random
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import tomllib
@@ -44,7 +48,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"  # official v1.7.4 asset
@@ -141,14 +145,13 @@ def load_manifest(root: Path) -> dict:
         if not isinstance(c["covers"], list) or not c["covers"]:
             die(f"check {c['id']!r}: `covers` must be a non-empty list of globs")
         c.setdefault("must_fail", [])
-        c.setdefault("synced_commit", "")
-        c.setdefault("synced_sources", {})
+        if not re.fullmatch(r"[\w.-]+", str(c["id"])):
+            die(f"check id {c['id']!r}: use letters, digits, '.', '_' and '-' only (it names verification/sync/<id>.json)")
+        c.setdefault("synced_commit", "")   # 0.3 manifests; newer syncs live in verification/sync/
         c.setdefault("tags", [])
         c.setdefault("harness", [])
         if not isinstance(c["harness"], list):
             die(f"check {c['id']!r}: `harness` must be a list of globs (the check's own test/model files)")
-        if not isinstance(c["synced_sources"], dict):
-            die(f"check {c['id']!r}: `synced_sources` is written by `verikit sync`; restore it or delete the line")
         c["_sources"] = sources
         for pattern in (*c["covers"], *c["harness"]):
             m = SOURCE_PREFIX.match(pattern)
@@ -224,35 +227,36 @@ def source_dir(root: Path, check: dict, name: str) -> Path | None:
     return path if path.is_dir() and git_toplevel(path) else None
 
 
-def _source_changes(src: Path, globs: list[str], since: str | None) -> tuple[int, list[str]]:
-    """Files under `src` matching `globs` that changed since commit `since` (None: only
-    uncommitted edits and untracked files), relative to `src`."""
-    specs = [f":(glob){g}" for g in globs]
-    found: set[str] = set()
-    code, out = 0, ""
-    if since:
-        code, out = git(src, "diff", "--name-only", "--relative", f"{since}..HEAD", "--", *specs)
-        if code != 0:
-            return code, [out]
-        found.update(out.splitlines())
-    _, dirty = git(src, "diff", "--name-only", "--relative", "HEAD", "--", *specs)
-    _, untracked = git(src, "ls-files", "--others", "--exclude-standard", "--", *specs)
-    found.update(dirty.splitlines())
-    found.update(untracked.splitlines())
-    return 0, sorted(f for f in found if f.strip())
-
-
 def pathspecs(check: dict) -> list[str]:
     return [f":(glob){p}" for p in watched(check)]
 
 
+def content_digest(data: bytes) -> str:
+    """Digest of a file's content with line endings normalised, so a CRLF checkout and an LF
+    checkout of the same commit give the same value."""
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()[:16]
+
+
+def _git_files(repo_dir: Path, globs: list[str]) -> list[str]:
+    """Files under `repo_dir` matching `globs` that git tracks or would track (not ignored
+    build output), relative to `repo_dir`. Outside a git repository: every match."""
+    if not globs:
+        return []
+    try:
+        p = subprocess.run(["git", "ls-files", "-z", "-co", "--exclude-standard", "--",
+                            *[f":(glob){g}" for g in globs]], cwd=repo_dir, capture_output=True)
+    except OSError:
+        p = None
+    if p is None or p.returncode != 0:
+        return sorted({f.relative_to(repo_dir).as_posix() for g in globs for f in repo_dir.glob(g) if f.is_file()})
+    return sorted({f for f in p.stdout.decode("utf-8", "replace").split("\0") if f})
+
+
 def check_files(root: Path, check: dict) -> list[Path]:
-    """Every file that decides this check's result: covered code, harness files, patches, and
-    the verification/<area>/ folders its commands refer to. Not the manifest itself (the
-    check's own entry is hashed separately) and not other checks' areas."""
+    """The check's own verification files: every file its commands and patches name, plus the
+    verification/<area>/ folders those live in (model, config, mutants). Not the manifest
+    (wording edits must not look like drift) and not other checks' areas."""
     files: set[Path] = set()
-    for pattern in watched(check):
-        files.update(p for p in root.glob(pattern) if p.is_file())
     vdir = (root / "verification").resolve()
     areas: set[Path] = set()
     for text in [check["run"], *[mf.get("run", "") for mf in check["must_fail"]],
@@ -265,28 +269,85 @@ def check_files(root: Path, check: dict) -> list[Path]:
                 if vdir in rp.parents and rp.parent != vdir:
                     areas.add(rp.parent)
     for area in areas:
-        files.update(x for x in area.rglob("*") if x.is_file())
-    return sorted(files)
+        files.update(x for x in area.rglob("*") if x.is_file() and not x.name.startswith(".verikit-"))
+    return sorted(f for f in files if f.resolve() != Path(__file__).resolve())
 
 
-def fingerprint(root: Path, check: dict) -> str:
-    """Hash of the check's meaning + every file that decides its result, including the files
-    it covers in other repositories."""
-    meaning = {k: v for k, v in check.items()
-               if k not in ("synced_commit", "synced_sources") and not k.startswith("_")}
-    h = hashlib.sha256(json.dumps(meaning, sort_keys=True, default=str).encode())
+def current_items(root: Path, check: dict) -> tuple[dict[str, str], list[str]]:
+    """label -> content digest for everything that decides whether the check still describes
+    the code: covered and harness files here, `name:path` files in other repositories, and the
+    check's own verification files. Second value: notes for repositories with no checkout."""
+    items: dict[str, str] = {}
+    for f in _git_files(root, watched(check)):
+        p = root / f
+        if p.is_file():
+            items[f] = content_digest(p.read_bytes())
     for p in check_files(root, check):
-        h.update(p.relative_to(root).as_posix().encode())
-        h.update(p.read_bytes())
+        items[p.resolve().relative_to(root.resolve()).as_posix()] = content_digest(p.read_bytes())
+    notes = []
     for name, globs in sorted(source_globs(check).items()):
         src = source_dir(root, check, name)
         if src is None:
-            h.update(f"{name}:<no checkout>".encode())
+            notes.append(f"{MISSING}{name}: no git checkout at {check['_sources'][name]['path']}; "
+                         f"clone it there or set {source_env(name)})")
             continue
-        for p in sorted({f for g in globs for f in src.glob(g) if f.is_file()}):
-            h.update(f"{name}:{p.relative_to(src).as_posix()}".encode())
-            h.update(p.read_bytes())
-    return h.hexdigest()
+        for f in _git_files(src, globs):
+            if (src / f).is_file():
+                items[f"{name}:{f}"] = content_digest((src / f).read_bytes())
+    return items, notes
+
+
+def items_hash(items: dict[str, str]) -> str:
+    return hashlib.sha256("\n".join(f"{k}\t{v}" for k, v in sorted(items.items())).encode()).hexdigest()
+
+
+def fingerprint(root: Path, check: dict) -> str:
+    """Local identity of 'this check on this content': its meaning in the manifest plus every
+    item. Used for the last-pass state and the hook; never committed."""
+    meaning = {k: v for k, v in check.items()
+               if k not in ("synced_commit", "synced_sources") and not k.startswith("_")}
+    items, notes = current_items(root, check)
+    return hashlib.sha256((json.dumps(meaning, sort_keys=True, default=str) + items_hash(items)
+                           + "".join(notes)).encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- sync records
+
+SYNC_DIR = Path("verification") / "sync"
+MAX_SYNC_FILES = 3000
+
+
+def sync_path(root: Path, check_id: str) -> Path:
+    return root / SYNC_DIR / f"{check_id}.json"
+
+
+def read_sync(root: Path, check_id: str) -> dict | None:
+    try:
+        rec = json.loads(sync_path(root, check_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) and rec.get("hash") else None
+
+
+def write_sync(root: Path, check: dict, items: dict[str, str]) -> Path:
+    """Record the content the check was just confirmed against. One small file per check, so
+    two branches that sync different checks merge without conflict, and no commit id, so
+    squash merges, rebases and shallow clones cannot invalidate it."""
+    rec: dict = {"check": check["id"], "hash": items_hash(items)}
+    if len(items) <= MAX_SYNC_FILES:
+        rec["files"] = dict(sorted(items.items()))
+    path = sync_path(root, check["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_keep(path, json.dumps(rec, indent=1) + "\n")
+    return path
+
+
+def sync_base(root: Path, check_id: str) -> str:
+    """The last commit that changed the check's sync record: the point to review from.
+    Always reachable, because it is found in this branch's own history."""
+    rel = (SYNC_DIR / f"{check_id}.json").as_posix()
+    code, out = git(root, "log", "-1", "--format=%h", "--", rel)
+    return out.strip() if code == 0 else ""
 
 
 def read_keep(path: Path) -> str:
@@ -567,7 +628,7 @@ def changed_checks(root: Path, checks: list[dict], base: str) -> list[dict]:
             _, out = git(root, "diff", "--name-only", f"{base}...HEAD", "--", *pathspecs(c))
             _, dirty = git(root, "status", "--porcelain", "--", *pathspecs(c))
             # other repositories have no PR base here: compare them with their sync commit
-            other = [f for s in source_globs(c) for f in _source_stale(root, c, s)[1] if not f.startswith(MISSING)]
+            other = [f for f in stale_info(root, c)[1] if _source_of(f, c)[0]] if source_globs(c) else []
             if out.strip() or dirty.strip() or other:
                 picked.append(c)
         else:
@@ -675,48 +736,40 @@ def cmd_run(args) -> int:
 
 # --------------------------------------------------------------------------- stale / sync / list
 
-RANK = {"synced": 0, "stale": 1, "never-synced": 2, "unknown": 3}
-
-
-def _local_stale(root: Path, check: dict) -> tuple[str, list[str]]:
+def _legacy_stale(root: Path, check: dict) -> tuple[str, list[str]]:
+    """A 0.3 manifest: `synced_commit` names a commit. It only works while that commit is
+    reachable, which a squash merge, a rebase or a shallow clone breaks."""
+    if source_globs(check):
+        return "never-synced", []
     specs = pathspecs(check)
-    _, dirty = git(root, "status", "--porcelain", "--", *specs)
-    dirty_files = [line[3:] for line in dirty.splitlines() if line.strip()]
-    sync = check.get("synced_commit", "")
-    if not sync:
-        return "never-synced", dirty_files
-    code, out = git(root, "diff", "--name-only", f"{sync}..HEAD", "--", *specs)
+    sync = check["synced_commit"]
+    hint = f"run `{self_cmd(root)} sync {check['id']}` to record content instead of a commit"
+    code, out = git(root, "diff", "--name-only", sync, "--", *specs)
     if code != 0:
-        return "unknown", [f"(git: {out})"]
-    changed = sorted(set(out.splitlines()) | set(dirty_files))
+        return "unknown", [f"(recorded by verikit 0.3 as commit {sync}, which is not in this history; {hint})"]
+    _, untracked = git(root, "ls-files", "--others", "--exclude-standard", "--", *specs)
+    changed = sorted({f for f in (out + "\n" + untracked).splitlines() if f.strip()})
     return ("stale" if changed else "synced"), changed
 
 
-def _source_stale(root: Path, check: dict, name: str) -> tuple[str, list[str]]:
-    """Drift in another repository, against the commit of it recorded at the last sync."""
-    src = source_dir(root, check, name)
-    if src is None:
-        return "unknown", [f"{MISSING}{name}: no git checkout at {check['_sources'][name]['path']}; "
-                           f"clone it there or set {source_env(name)})"]
-    sha = check.get("synced_sources", {}).get(name, "")
-    code, files = _source_changes(src, source_globs(check)[name], sha or None)
-    if code != 0:
-        return "unknown", [f"{name}: (git: {files[0]})"]
-    files = [f"{name}:{f}" for f in files]
-    if not sha:
-        return "never-synced", files
-    return ("stale" if files else "synced"), files
-
-
 def stale_info(root: Path, check: dict) -> tuple[str, list[str]]:
-    """(status, changed files). status: synced | stale | never-synced | unknown (worst wins).
-    Files in other repositories are shown as `name:path`."""
-    status, changed = _local_stale(root, check)
-    for name in source_globs(check):
-        s, files = _source_stale(root, check, name)
-        status = s if RANK[s] > RANK[status] else status
-        changed = [*changed, *files]
-    return status, changed
+    """(status, what differs). status: synced | stale | never-synced | unknown.
+    Compares today's content with the content recorded by the last `sync`; it needs no git
+    history. Files in other repositories are shown as `name:path`."""
+    rec = read_sync(root, check["id"])
+    if rec is None:
+        return _legacy_stale(root, check) if check.get("synced_commit") else ("never-synced", [])
+    items, notes = current_items(root, check)
+    absent = [name for name in source_globs(check) if source_dir(root, check, name) is None]
+    if "files" in rec:
+        old = {k: v for k, v in rec["files"].items() if not any(k.startswith(n + ":") for n in absent)}
+        changed = sorted(k for k in old.keys() | items.keys() if old.get(k) != items.get(k))
+    elif absent:
+        changed = []
+    else:
+        changed = [] if rec["hash"] == items_hash(items) else ["(covered files differ from the recorded content)"]
+    status = "unknown" if notes else ("stale" if changed else "synced")
+    return status, [*changed, *notes]
 
 
 def self_cmd(root: Path) -> str:
@@ -735,9 +788,13 @@ def cmd_stale(args) -> int:
     for c in select(m["check"], args.ids, args.tag):
         status, files = stale_info(root, c)
         any_stale |= status != "synced"
-        print(f"{status:13} {c['id']}  (sync {c.get('synced_commit') or '-'})")
+        print(f"{status:13} {c['id']}")
         for f in files:
             print(f"              changed: {f}")
+        base = sync_base(root, c["id"]) if status == "stale" else ""
+        if base:
+            print(f"              review:  git log -p {base}..HEAD -- <the files above>   "
+                  f"({base} last recorded this check)")
     if any_stale:
         print("\nA stale check may still pass while describing code that no longer exists.\n"
               "Re-read the changes (verify-maintain skill), update the model if needed, then "
@@ -764,74 +821,37 @@ def cmd_list(args) -> int:
             print(f"    harness: {', '.join(c['harness'])}")
         for name in source_globs(c):
             src = source_dir(root, c, name)
-            print(f"    source:  {name} = {src or c['_sources'][name]['path'] + ' (NOT checked out)'}; "
-                  f"sync {c['synced_sources'].get(name) or '-'}")
+            print(f"    source:  {name} = {src or c['_sources'][name]['path'] + ' (NOT checked out)'}")
         print(f"    run:     {c['run']}")
         print(f"    variants:{len(c['must_fail']):>2} must_fail")
-        print(f"    sync:    {c.get('synced_commit') or '-'} ({status});  last local pass: "
+        print(f"    sync:    {status};  last local pass: "
               f"{last.get('at', 'never')}{'' if fresh or not last else ' (code changed since)'}")
     return OK
 
 
-def set_check_value(text: str, check_id: str, key: str, value: str, after: str = "id") -> str:
-    """Rewrite one `key = value` line of one check (TOML value given as text), keeping every
-    other byte and line ending as is. A missing line is inserted after the `after` line."""
-    nl = "\r\n" if "\r\n" in text else "\n"
-    blocks = re.split(r"(?m)^(?=\[\[check\]\]|\[sources\.)", text)
-    for i, block in enumerate(blocks):
-        if block.startswith("[[check]]") and re.search(rf'(?m)^id\s*=\s*"{re.escape(check_id)}"\s*$', block):
-            line = f"{key} = {value}"
-            if re.search(rf"(?m)^{key}\s*=", block):
-                blocks[i] = re.sub(rf"(?m)^{key}\s*=[^\r\n]*", lambda _: line, block, count=1)
-            else:
-                anchor = rf'(?m)^({after}\s*=[^\r\n]*)'
-                if not re.search(anchor, block):
-                    anchor = rf'(?m)^(id\s*=\s*"{re.escape(check_id)}"[^\r\n]*)'
-                blocks[i] = re.sub(anchor, lambda mm: f"{mm.group(1)}{nl}{line}", block, count=1)
-            return "".join(blocks)
-    die(f"check {check_id!r} not found in manifest")
-
-
-def set_synced_commit(text: str, check_id: str, sha: str) -> str:
-    return set_check_value(text, check_id, "synced_commit", f'"{sha}"')
-
-
 def cmd_sync(args) -> int:
+    """Re-run each check on the content that is on disk now and record that content as
+    confirmed (verification/sync/<id>.json). Commit the record with the change it confirms."""
     root = find_root(args.root)
     recover_pending(root)
     m = load_manifest(root)
-    code, sha = git(root, "rev-parse", "--short=12", "HEAD")
-    if code != 0:
-        die("sync needs a git repository with at least one commit")
     for c in select(m["check"], args.ids):
-        _, dirty = git(root, "status", "--porcelain", "--", *pathspecs(c))
-        if dirty.strip():
-            die(f"{c['id']}: covered files have uncommitted changes; commit first so the sync "
-                f"commit describes exactly what was checked:\n{dirty}")
-        other_shas = {}
-        for name, globs in source_globs(c).items():  # other repositories: clean, then record HEAD
-            src = source_dir(root, c, name)
-            if src is None:
+        for name in source_globs(c):
+            if source_dir(root, c, name) is None:
                 die(f"{c['id']}: it covers files in {name!r}, but there is no git checkout at "
                     f"{c['_sources'][name]['path']}. Clone it there or set {source_env(name)}.")
-            _, edits = _source_changes(src, globs, None)
-            if edits:
-                die(f"{c['id']}: covered files in {name} ({src}) have uncommitted changes; commit them "
-                    f"there first: {', '.join(edits)}")
-            other_shas[name] = git(src, "rev-parse", "--short=12", "HEAD")[1]
+        before, _ = current_items(root, c)
         r = run_check(root, c, args.timeout, False, args.seed)
         if not r["ok"]:
-            die(f"{c['id']} does not pass, so its sync commit stays at {c.get('synced_commit') or '-'}", FAILED)
-        path = root / MANIFEST_REL
-        text = set_synced_commit(read_keep(path), c["id"], sha)
-        if other_shas:
-            table = "{ " + ", ".join(f'{n} = "{s}"' for n, s in sorted(other_shas.items())) + " }"
-            text = set_check_value(text, c["id"], "synced_sources", table, after="synced_commit")
-        write_keep(path, text)
+            die(f"{c['id']} does not pass, so its sync record is unchanged", FAILED)
+        items, _ = current_items(root, c)
+        if items != before:
+            die(f"{c['id']}: covered files changed while the check was running; run sync again")
+        path = write_sync(root, c, items)
         state = read_state(root)  # this rerun passed: record it, so `list` and the hook see it
         state[c["id"]] = {"fingerprint": fingerprint(root, c), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         write_state(root, state)
-        print(f"   synced {c['id']} -> {sha}. Commit {MANIFEST_REL.as_posix()} to record it.")
+        print(f"   synced {c['id']}. Commit {path.relative_to(root).as_posix()} together with the change it confirms.")
     return OK
 
 
@@ -854,19 +874,64 @@ def manifest_roots(project: Path, depth: int = 5) -> list[Path]:
     return roots
 
 
-def cmd_hook(args) -> int:
-    """Stop hook. Blocks finishing while covered code differs from its sync commit and no
-    passing run has seen that exact content; warns once when a passing check is stale.
-    Never blocks twice in a row (stop_hook_active)."""
+SESSIONS = "sessions"
+
+
+def _where(root: Path, project: Path) -> str:
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
+        rel = root.relative_to(project).as_posix()
+        return "" if rel == "." else f" (in {rel})"
     except ValueError:
-        payload = {}
-    if payload.get("stop_hook_active"):
-        return OK
-    project = Path(payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
+        return f" (in {root})"
+
+
+def _drifted(status: str, changed: list[str]) -> bool:
+    """Out of date in a way someone can act on. A repository that is simply not checked out
+    on this machine does not count."""
+    if status == "unknown":
+        return any(not f.startswith(MISSING) for f in changed)
+    return status != "synced"
+
+
+def _hook_session_start(project: Path, session: str) -> int:
+    """Remember what every check's content looked like when the session began, so the Stop
+    hook can tell this session's edits from drift that was already there. Tell the agent once
+    about checks that were out of date before it started (stdout becomes session context)."""
     lines: list[str] = []
-    for root in manifest_roots(project.resolve()):
+    for root in manifest_roots(project):
+        try:
+            recover_pending(root)
+            m = load_manifest(root)
+        except VerikitError:
+            continue
+        if not m["check"] or not session:
+            continue
+        folder = state_path(root, SESSIONS)
+        folder.mkdir(exist_ok=True)
+        path = folder / f"{session}.json"
+        if path.exists():       # resume or compact: keep the first baseline, say nothing twice
+            continue
+        for old in folder.glob("*.json"):
+            if time.time() - old.stat().st_mtime > 14 * 86400:
+                old.unlink(missing_ok=True)
+        path.write_text(json.dumps({c["id"]: fingerprint(root, c) for c in m["check"]}), encoding="utf-8")
+        stale = [(c, status) for c in m["check"] for status, changed in [stale_info(root, c)]
+                 if _drifted(status, changed)]
+        if stale:
+            lines.append(f"verikit{_where(root, project)}: these machine-checked promises were already out "
+                         "of date before this session started (not your edits):")
+            lines += [f"  - {c['id']} ({status}): \"{c['rule']}\"" for c, status in stale]
+            lines.append("If your task touches their code, follow the verify-maintain skill "
+                         f"(`{self_cmd(root)} stale` lists what changed). Otherwise leave them and "
+                         "mention them in your report.")
+    if lines:
+        print("\n".join(lines))
+    return OK
+
+
+def _hook_stop(project: Path, session: str) -> int:
+    lines: list[str] = []
+    for root in manifest_roots(project):
         try:
             recover_pending(root)
             m = load_manifest(root)
@@ -874,13 +939,20 @@ def cmd_hook(args) -> int:
             lines.append(f"verikit ({root}): {e}")
             continue
         state = read_state(root)
+        try:
+            baseline = json.loads((root / STATE_DIR / SESSIONS / f"{session}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            baseline = None
         unchecked, unconfirmed = [], []
         for c in m["check"]:
-            _, changed = stale_info(root, c)
-            # a repository this developer has not checked out is not a reason to block them
-            if not [f for f in changed if not f.startswith(MISSING)]:
-                continue
             fp = fingerprint(root, c)
+            status, changed = stale_info(root, c)
+            if baseline is not None:
+                touched = baseline.get(c["id"]) != fp      # this session changed what the check reads
+            else:
+                touched = status != "never-synced" and _drifted(status, changed)   # cannot tell whose edit
+            if not touched or status == "synced":
+                continue
             entry = state.get(c["id"], {})
             if entry.get("fingerprint") != fp:
                 unchecked.append(c)
@@ -889,32 +961,50 @@ def cmd_hook(args) -> int:
                 state[c["id"]] = {**entry, "stale_warned": fp}
         if unconfirmed:
             write_state(root, state)
-        try:
-            rel = root.relative_to(project.resolve()).as_posix()
-            where = "" if rel == "." else f" (in {rel})"
-        except ValueError:
-            where = f" (in {root})"
+        where = _where(root, project)
         if unchecked:
-            lines.append(f"You changed code that a formal check covers{where}, and no passing run has seen these edits:")
+            if baseline is not None:
+                lines.append(f"This session changed code that a formal check covers{where}, and no passing "
+                             "run has seen these edits:")
+            else:
+                lines.append(f"Covered code{where} differs from what these checks last confirmed, and no "
+                             "passing run on this machine has seen it (this session's edits or an earlier change):")
             for c in unchecked:
                 lines.append(f"  - {c['id']}: \"{c['rule']}\"  ->  cd {root} && {self_cmd(root)} run {c['id']}")
             lines.append("Run the check(s). If one fails, report the counterexample in plain words; "
                          "do not weaken the rule or the model to make it pass.")
         if unconfirmed:
-            lines.append(f"These checks pass{where}, but they describe the code at their sync commit "
-                         "and the covered code has changed since:")
+            lines.append(f"These checks pass{where}, but their sync record describes older content:")
             for c in unconfirmed:
-                lines.append(f"  - {c['id']} (sync {c.get('synced_commit') or 'never'}): \"{c['rule']}\"")
+                lines.append(f"  - {c['id']}: \"{c['rule']}\"  ->  {self_cmd(root)} sync {c['id']}")
             lines.append("A model does not see code changes. Follow the verify-maintain skill "
                          "(.claude/skills/verify-maintain/SKILL.md): read the diff against the model, update it "
-                         f"if the code changed shape, then `{self_cmd(root)} sync <id>`. If you do not, say in "
-                         "your report that the model was not re-confirmed.")
+                         "if the code changed shape, then sync and commit verification/sync/<id>.json with "
+                         "your change. If you do not, say in your report that the model was not re-confirmed.")
     if not lines:
         return OK
     # Claude Code's documented JSON block: the agent receives `reason` and keeps working.
     # (The app shows its own "Stop hook" notice to the user whenever a Stop hook blocks.)
     print(json.dumps({"decision": "block", "reason": "\n".join(lines)}))
     return OK
+
+
+def cmd_hook(args) -> int:
+    """Claude Code hook for two events. SessionStart: record a baseline per session. Stop: block
+    while this session's edits to covered code are unchecked; remind once when a passing check's
+    sync record is older than the code. Never blocks twice in a row (stop_hook_active)."""
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        payload = {}
+    event = payload.get("hook_event_name") or "Stop"
+    session = re.sub(r"[^\w.-]", "_", str(payload.get("session_id") or ""))[:80]
+    project = Path(payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()).resolve()
+    if event == "SessionStart":
+        return _hook_session_start(project, session)
+    if event != "Stop" or payload.get("stop_hook_active"):
+        return OK
+    return _hook_stop(project, session)
 
 
 # --------------------------------------------------------------------------- TLA+ (TLC)
@@ -1423,7 +1513,7 @@ version = 1
 # harness = ["tests/Payments.Tests/CheckoutVerificationTests.cs"]     # the check's own test files outside verification/
 # bounds = "1 order, up to 3 attempts"
 # assumes = ["The payment provider deduplicates by idempotency key"]
-# synced_commit = ""          # set by `verikit sync <id>`, never by hand
+# (`verikit sync <id>` records what the check was confirmed against in verification/sync/<id>.json)
 #
 #   [[check.must_fail]]       # a check you have never seen fail proves nothing
 #   why = "Broken variant: a fresh idempotency key on every retry"
@@ -1471,6 +1561,13 @@ def ci_list(value: str) -> list[str]:
     return names
 
 
+def hook_command(script: str) -> str:
+    """One command line for every developer's machine: macOS and many Linux systems have only
+    `python3`, Windows usually only `python`. Claude Code runs it with sh, or Git Bash on Windows."""
+    # The probe is silent on purpose: Windows ships a placeholder `python3` that prints a hint.
+    return f'if python3 -c "" >/dev/null 2>&1; then python3 {script} hook; else python {script} hook; fi'
+
+
 def cmd_init(args) -> int:
     root = (args.root or Path.cwd()).resolve()
     top = git_toplevel(root)
@@ -1507,13 +1604,28 @@ def cmd_init(args) -> int:
     if args.hook:
         settings = top / ".claude" / "settings.json"
         data = json.loads(_read(settings) or "{}") if settings.exists() else {}
-        hook_cmd = 'python "${CLAUDE_PROJECT_DIR}/' + target.relative_to(top).as_posix() + '" hook'
-        stop = data.setdefault("hooks", {}).setdefault("Stop", [])
-        if not any("verikit.py" in h.get("command", "") for entry in stop for h in entry.get("hooks", [])):
-            stop.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 60}]})
+        hooks = data.setdefault("hooks", {})
+        existing = [h for event in ("SessionStart", "Stop") for entry in hooks.get(event, [])
+                    for h in entry.get("hooks", []) if "verikit.py" in h.get("command", "")]
+        # one hook serves every verification root in the repo: keep the runner an earlier init chose
+        found = re.search(r'"(\$\{CLAUDE_PROJECT_DIR\}/[^"]*verikit\.py)"', existing[0]["command"]) if existing else None
+        script = f'"{found.group(1)}"' if found else '"${CLAUDE_PROJECT_DIR}/' + target.relative_to(top).as_posix() + '"'
+        hook_cmd = hook_command(script)
+        done = []
+        for event in ("SessionStart", "Stop"):   # SessionStart records the baseline that Stop compares with
+            entries = hooks.setdefault(event, [])
+            mine = [h for entry in entries for h in entry.get("hooks", []) if "verikit.py" in h.get("command", "")]
+            if not mine:
+                entries.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 60}]})
+                done.append(f"added the {event} hook")
+            for h in mine:
+                if h["command"] != hook_cmd:
+                    h["command"] = hook_cmd
+                    done.append(f"updated the {event} hook")
+        if done:
             settings.parent.mkdir(exist_ok=True)
             write_keep(settings, json.dumps(data, indent=2) + "\n")
-            print("added Stop hook to .claude/settings.json")
+            print(f"{', '.join(done)} in .claude/settings.json")
     for ci in args.ci:
         src, dest = CI_TEMPLATES[ci]
         dest = top / dest
