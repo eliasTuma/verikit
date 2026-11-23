@@ -1,7 +1,7 @@
 """Run every example through the real verikit flow, each in its own fresh git repo.
 
     python scripts/check_examples.py                 # all examples
-    python scripts/check_examples.py dotnet-checkout # one example
+    python scripts/check_examples.py dotnet-checkout # one example; SKIPPED counts as a failure
 
 Each example says how to run it in examples/<name>/example.toml:
     setup = "npm ci"            # optional; {python} = this Python
@@ -81,7 +81,7 @@ def check(name: str) -> tuple[str, str]:
     repo = work / name
     try:
         shutil.copytree(EXAMPLES / name, repo, ignore=shutil.ignore_patterns(
-            "node_modules", ".verikit", "bin", "obj", "TestResults"))
+            "node_modules", ".verikit", "bin", "obj", "TestResults", "packages"))
         for args in (["init", "-q", "-b", "main"], ["config", "user.email", "ci@example.invalid"],
                      ["config", "user.name", "ci"], ["config", "core.autocrlf", "false"]):
             sh(["git", *args], repo)
@@ -112,9 +112,13 @@ def check(name: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    names = sys.argv[1:] or all_examples()
-    rows = [(n, *check(n)) for n in names]
+    named = sys.argv[1:]
+    rows = [(n, *check(n)) for n in (named or all_examples())]
     print("\n" + "\n".join(f"{status:8} {name:22} {detail}" for name, status, detail in rows))
+    if named and any(status == "SKIPPED" for _, status, _ in rows):
+        print("\nan example named on the command line was SKIPPED; that counts as a failure "
+              "(CI must not report an example as run when it was not)")
+        return 1
     return 1 if any(status == "FAILED" for _, status, _ in rows) else 0
 
 

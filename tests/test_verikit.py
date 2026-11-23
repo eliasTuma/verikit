@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 import unittest
 import xml.etree.ElementTree as ET
+from unittest import mock
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
@@ -226,6 +227,39 @@ class RunAndPatches(unittest.TestCase):
         self.assertIn("reverted broken-variant patch", out)
         self.assertEqual((self.r.root / "src" / "app.txt").read_text(encoding="utf-8"), "guard = on\n")
 
+    def test_revert_restores_exact_bytes_under_autocrlf(self):
+        # LF file on disk + core.autocrlf=true: git apply writes CRLF, so `apply -R` alone
+        # cannot give the original bytes back. verikit must restore them exactly.
+        app = self.r.root / "src" / "app.txt"
+        app.write_bytes(b"guard = on\nline two\n")
+        self.r.commit("lf file")
+        patch = self.r.root / "verification" / "break.patch"
+        patch.write_bytes(b"--- a/src/app.txt\n+++ b/src/app.txt\n@@ -1,2 +1,2 @@\n-guard = on\n"
+                          b"+guard = BROKEN\n line two\n")
+        self.r.commit("lf patch")
+        git(self.r.top, "config", "core.autocrlf", "true")
+        code, out = vk("run", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(app.read_bytes(), b"guard = on\nline two\n")
+        self.assertFalse((self.r.root / verikit.STATE_DIR / verikit.PENDING).exists())
+
+    def test_recovery_restores_exact_bytes_from_backup(self):
+        app = self.r.root / "src" / "app.txt"
+        original = app.read_bytes()
+        with self.assertRaises(KeyboardInterrupt):      # killed while the variant is applied
+            with verikit.AppliedPatch(self.r.root, "verification/break.patch"):
+                self.assertIn(b"BROKEN", app.read_bytes())
+                raise KeyboardInterrupt
+        self.assertEqual(app.read_bytes(), original)    # __exit__ ran
+        # a hard kill skips __exit__: simulate it, then the next command must restore
+        p = verikit.AppliedPatch(self.r.root, "verification/break.patch").__enter__()
+        self.assertIn(b"BROKEN", app.read_bytes())
+        del p
+        code, out = vk("list", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.assertIn("reverted broken-variant patch", out)
+        self.assertEqual(app.read_bytes(), original)
+
     def test_tag_filter(self):
         code, out = vk("run", "--root", str(self.r.root), "--tag", "nope")
         self.assertEqual(code, 2)
@@ -300,18 +334,100 @@ class StaleChangedHook(unittest.TestCase):
 
     def test_hook_blocks_then_warns_once_then_allows(self):
         payload = json.dumps({"cwd": str(self.r.top)})
-        self.assertEqual(vk("hook", stdin=payload)[0], 0)            # nothing changed
+
+        def hook(stdin: str) -> str | None:
+            """The block reason the hook hands Claude Code, or None when it lets the agent stop."""
+            code, out = vk("hook", stdin=stdin)
+            self.assertEqual(code, 0, out)
+            if not out.strip():
+                return None
+            decision = json.loads(out)
+            self.assertEqual(decision["decision"], "block")
+            return decision["reason"]
+
+        self.assertIsNone(hook(payload))                              # nothing changed
         (self.r.root / "src" / "notes.txt").write_text("x\n", encoding="utf-8")
         self.r.commit("edit")
-        code, out = vk("hook", stdin=payload)
-        self.assertEqual(code, 2)                                     # unchecked edit
-        self.assertIn("(in svc)", out)
-        self.assertEqual(vk("hook", stdin=json.dumps({"cwd": str(self.r.top), "stop_hook_active": True}))[0], 0)
+        self.assertIn("(in svc)", hook(payload))                      # unchecked edit: blocked
+        self.assertIsNone(hook(json.dumps({"cwd": str(self.r.top), "stop_hook_active": True})))
         self.assertEqual(vk("run", "--root", str(self.r.root))[0], 0)
-        code, out = vk("hook", stdin=payload)
-        self.assertEqual(code, 2)                                     # passes, but model unconfirmed
-        self.assertIn("describe the code at their sync commit", out)
-        self.assertEqual(vk("hook", stdin=payload)[0], 0)             # warned once only
+        self.assertIn("describe the code at their sync commit", hook(payload))  # passes, model unconfirmed
+        self.assertIsNone(hook(payload))                              # warned once only
+
+
+CI_VARS = ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "TF_BUILD", "BUILD_REASON",
+           "SYSTEM_PULLREQUEST_TARGETBRANCH", "SYSTEM_PULLREQUEST_TARGETBRANCHNAME",
+           "CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+
+
+def ci_env(**values: str):
+    """os.environ without any real CI variables (the kit's own CI sets them), plus `values`."""
+    env = {k: v for k, v in os.environ.items() if k not in CI_VARS}
+    return mock.patch.dict(os.environ, {**env, **values}, clear=True)
+
+
+class CiMode(unittest.TestCase):
+    def test_target_branch_for_each_ci(self):
+        tb = verikit.ci_target_branch
+        self.assertEqual(tb({"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request",
+                             "GITHUB_BASE_REF": "main"})[0], "main")
+        self.assertIsNone(tb({"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push"})[0])
+        # Azure Repos spells the target refs/heads/<name>; GitHub-hosted repos spell it <name>
+        self.assertEqual(tb({"TF_BUILD": "True", "BUILD_REASON": "PullRequest",
+                             "SYSTEM_PULLREQUEST_TARGETBRANCH": "refs/heads/release/2.1"})[0], "release/2.1")
+        self.assertEqual(tb({"TF_BUILD": "True", "BUILD_REASON": "PullRequest",
+                             "SYSTEM_PULLREQUEST_TARGETBRANCH": "main"})[0], "main")
+        self.assertIsNone(tb({"TF_BUILD": "True", "BUILD_REASON": "IndividualCI"})[0])
+        self.assertEqual(tb({"CI_MERGE_REQUEST_TARGET_BRANCH_NAME": "develop"})[0], "develop")
+        self.assertIsNone(tb({})[0])
+
+    def setUp(self):
+        self.r = Repo(GOOD)
+        self.r.make_patch()
+        vk("sync", "guard", "--root", str(self.r.root))
+        self.r.commit("sync")
+
+    def tearDown(self):
+        self.r.close()
+
+    def add_origin(self) -> None:
+        bare = self.r.tmp.parent / (self.r.tmp.name + "-origin.git")
+        git(self.r.tmp.parent, "clone", "-q", "--bare", str(self.r.top), str(bare))
+        self.addCleanup(rmtree, bare)
+        git(self.r.top, "remote", "add", "origin", str(bare))
+        git(self.r.top, "fetch", "-q", "origin")
+        git(self.r.top, "checkout", "-q", "-b", "feature")
+
+    def test_pull_request_runs_only_changed_checks(self):
+        self.add_origin()
+        pr = dict(TF_BUILD="True", BUILD_REASON="PullRequest", SYSTEM_PULLREQUEST_TARGETBRANCH="refs/heads/main")
+        (self.r.top / "README.md").write_text("docs only\n", encoding="utf-8")
+        self.r.commit("docs")
+        with ci_env(**pr):
+            code, out = vk("run", "--root", str(self.r.root), "--ci")
+        self.assertEqual(code, 0, out)
+        self.assertIn("nothing to run", out)
+        (self.r.root / "src" / "notes.txt").write_text("covered\n", encoding="utf-8")
+        self.r.commit("covered edit")
+        with ci_env(**pr):
+            code, out = vk("run", "--root", str(self.r.root), "--ci")
+        self.assertEqual(code, 0, out)
+        self.assertIn("vs origin/main", out)
+        self.assertIn("== guard", out)
+
+    def test_missing_base_runs_everything_never_nothing(self):
+        with ci_env(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="pull_request", GITHUB_BASE_REF="main"):
+            code, out = vk("run", "--root", str(self.r.root), "--ci")   # no origin remote at all
+        self.assertEqual(code, 0, out)
+        self.assertIn("Running every check instead", out)
+        self.assertIn("== guard", out)
+
+    def test_not_a_pull_request_runs_everything(self):
+        with ci_env(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="push"):
+            code, out = vk("run", "--root", str(self.r.root), "--ci")
+        self.assertEqual(code, 0, out)
+        self.assertIn("== guard", out)
+        self.assertEqual(vk("run", "--root", str(self.r.root), "--ci", "--changed")[0], 2)
 
 
 class Explorer(unittest.TestCase):
@@ -371,6 +487,28 @@ class Init(unittest.TestCase):
             self.assertEqual(code, 0)
             settings = json.loads((r.top / ".claude" / "settings.json").read_text(encoding="utf-8"))
             self.assertEqual(len(settings["hooks"]["Stop"]), 1)
+        finally:
+            r.close()
+
+    def test_init_ci_both_lists_every_root(self):
+        r = Repo(GOOD)
+        try:
+            (r.root / "verification" / "verification.toml").unlink()
+            other = r.top / "web"
+            other.mkdir()
+            self.assertEqual(vk("init", "--root", str(r.root), "--no-skills", "--ci", "both")[0], 0)
+            code, out = vk("init", "--root", str(other), "--no-skills", "--ci", "github,azure")
+            self.assertEqual(code, 0, out)
+            self.assertIn("added root web", out)
+            for f in (".github/workflows/verify.yml", "azure-pipelines.verify.yml"):
+                line = [x for x in (r.top / f).read_text(encoding="utf-8").splitlines()
+                        if x.rstrip().endswith("# verikit:roots")]
+                self.assertEqual(len(line), 1, f)
+                self.assertIn('["svc", "web"]', line[0], f)
+            code, out = vk("init", "--root", str(other), "--no-skills", "--ci", "azure")
+            self.assertIn("already runs root web", out)
+            with self.assertRaises(SystemExit):                                # argparse rejects it
+                vk("init", "--root", str(other), "--ci", "jenkins")
         finally:
             r.close()
 

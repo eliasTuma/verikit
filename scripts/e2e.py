@@ -10,6 +10,7 @@ code check, flagged by `stale`, and blocked by the Stop hook -> working tree res
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -35,9 +36,16 @@ def rmtree(path) -> None:
     shutil.rmtree(path, onerror=onerror) if sys.version_info < (3, 12) else shutil.rmtree(path, onexc=onerror)
 
 
-def sh(cmd: list[str] | str, cwd: Path, expect: int | None = 0, stdin: str | None = None) -> str:
+CI_VARS = ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "TF_BUILD", "BUILD_REASON",
+           "SYSTEM_PULLREQUEST_TARGETBRANCH", "SYSTEM_PULLREQUEST_TARGETBRANCHNAME",
+           "CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+CLEAN_ENV = {k: v for k, v in os.environ.items() if k not in CI_VARS}  # this script may run inside CI
+
+
+def sh(cmd: list[str] | str, cwd: Path, expect: int | None = 0, stdin: str | None = None,
+       env: dict | None = None) -> str:
     p = subprocess.run(cmd, cwd=cwd, input=stdin, capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", shell=isinstance(cmd, str))
+                       errors="replace", shell=isinstance(cmd, str), env={**CLEAN_ENV, **(env or {})})
     out = p.stdout + p.stderr
     shown = cmd if isinstance(cmd, str) else " ".join(cmd)
     print(f"$ {shown}  -> exit {p.returncode}")
@@ -68,12 +76,18 @@ def main() -> int:
         sh(["git", "commit", "-qm", "fixture"], repo)
         sh("npm install --no-audit --no-fund --silent", svc)
 
-        out = sh([PY, str(KIT / "verikit.py"), "init", "--hook"], svc)
+        out = sh([PY, str(KIT / "verikit.py"), "init", "--hook", "--ci", "both"], svc)
         must((svc / "verification" / "verikit.py").exists(), "init vendored the runner", out)
         settings = json.loads((repo / ".claude" / "settings.json").read_text(encoding="utf-8"))
         cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
         must("services/checkout/verification/verikit.py" in cmd, "hook points at the nested runner", cmd)
         must((repo / ".claude" / "skills" / "verify-create" / "SKILL.md").exists(), "skills installed at the git top level")
+        (repo / "services" / "web").mkdir()
+        sh([PY, str(KIT / "verikit.py"), "init", "--no-skills", "--ci", "github,azure"], repo / "services" / "web")
+        for wf in (".github/workflows/verify.yml", "azure-pipelines.verify.yml"):
+            text = (repo / wf).read_text(encoding="utf-8")
+            must('["services/checkout", "services/web"]' in text, f"{wf} lists both verification roots", text)
+        shutil.rmtree(repo / "services" / "web")
         sh(["git", "add", "-A"], repo)
         sh(["git", "commit", "-qm", "add verikit"], repo)
 
@@ -93,19 +107,40 @@ def main() -> int:
 
         # A refactor reintroduces the bug, committed. The model cannot see it; the rest must.
         patch = svc / "verification" / "checkout" / "mutants" / "fresh-key-per-attempt.patch"
+        bare = tmp / "origin.git"   # an "origin" so the PR build has a target branch to diff against
+        sh(["git", "clone", "-q", "--bare", str(repo), str(bare)], tmp)
+        sh(["git", "remote", "add", "origin", str(bare)], repo)
+        sh(["git", "fetch", "-q", "origin"], repo)
+        sh(["git", "checkout", "-q", "-b", "feature/refactor"], repo)
         sh(["git", "apply", "--directory=services/checkout", str(patch)], repo)
         sh(["git", "commit", "-qam", "refactor: key per attempt"], repo)
+
+        # What the Azure template runs on this PR (Azure Repos spells the target refs/heads/main)
+        azure_pr = {"TF_BUILD": "True", "BUILD_REASON": "PullRequest",
+                    "SYSTEM_PULLREQUEST_TARGETBRANCH": "refs/heads/main"}
+        out = sh([*vk, "run", "--ci", "--seed", "7", "--junit", "verify-results.xml"], svc, expect=1, env=azure_pr)
+        must("Azure Pipelines pull request into main" in out, "--ci reads the Azure PR target branch", out)
+        must("1/2 checks OK; failing: checkout-code" in out, "the Azure PR build catches the regression", out)
+        report = (svc / "verify-results.xml").read_text(encoding="utf-8")
+        must(re.search(r'<testsuites[^>]* failures="[1-9]', report) is not None and "checkout-code" in report, "JUnit for the Tests tab names the failing check")
+        (svc / "verify-results.xml").unlink()
+        # A GitHub push build (not a PR) runs everything
+        out = sh([*vk, "run", "--ci", "--seed", "7"], svc, expect=1,
+                 env={"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push"})
+        must("not a pull request; running every check" in out, "--ci on a push runs every check", out)
         out = sh([*vk, "run", "--changed", "--seed", "7"], svc, expect=1)
         must("== checkout-design" in out and "== checkout-code" in out, "--changed picks both checks", out)
         must("1/2 checks OK; failing: checkout-code" in out, "design check stays green (blind), code check goes red", out)
         out = sh([*vk, "stale", "--strict"], svc, expect=1)
         must("stale" in out, "stale flags the drift", out)
-        out = sh([PY, str(svc / "verification" / "verikit.py"), "hook"], repo, expect=2,
+        out = sh([PY, str(svc / "verification" / "verikit.py"), "hook"], repo,
                  stdin=json.dumps({"cwd": str(repo)}))
-        must("checkout-code" in out and "services/checkout" in out, "Stop hook blocks and names the nested root", out)
-        sh([PY, str(svc / "verification" / "verikit.py"), "hook"], repo, expect=0,
-           stdin=json.dumps({"cwd": str(repo), "stop_hook_active": True}))
-        print("   ok: hook never blocks twice in a row")
+        decision = json.loads([line for line in out.splitlines() if line.startswith("{")][-1])
+        must(decision["decision"] == "block" and "checkout-code" in decision["reason"]
+             and "services/checkout" in decision["reason"], "Stop hook blocks and names the nested root", out)
+        out = sh([PY, str(svc / "verification" / "verikit.py"), "hook"], repo,
+                 stdin=json.dumps({"cwd": str(repo), "stop_hook_active": True}))
+        must('"decision"' not in out, "hook never blocks twice in a row", out)
 
         print("\nE2E PASSED")
         return 0

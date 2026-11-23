@@ -7,11 +7,11 @@ own test project, a code-level verifier - any tool, any language), the files it 
 broken variants that MUST fail, and the commit where it last matched the code.
 
     python verikit.py doctor                 stacks, test frameworks and tools found; what fits
-    python verikit.py init [--hook] [--ci github|azure]
+    python verikit.py init [--hook] [--ci github,azure]
                                              scaffold verification/ (+ skills, Stop hook, CI)
     python verikit.py list                   every check: rule, covers, bounds, sync state
     python verikit.py run [ID ...]           run checks; every must_fail variant has to FAIL
-          [--tag T] [--changed [REF]] [--junit FILE] [--json FILE] [--seed N]
+          [--tag T] [--changed [REF] | --ci] [--junit FILE] [--json FILE] [--seed N]
     python verikit.py stale [--strict]       checks whose covered code changed since their sync commit
     python verikit.py sync ID ...            re-run, then record HEAD as the sync commit
     python verikit.py tlc SPEC.tla [-c CFG] [--const K=V] [--inv NAME]
@@ -301,30 +301,65 @@ def _digest(files: list[Path]) -> dict[str, str]:
     return {str(f): hashlib.sha256(f.read_bytes()).hexdigest() if f.exists() else "-" for f in files}
 
 
+BACKUP_DIR = "patch-backup"
+
+
+def _restore(root: Path, files: list[dict]) -> list[str]:
+    """Put back the exact bytes saved before a patch was applied (a file the patch created is
+    removed). Byte-exact, so line-ending conversion (core.autocrlf) cannot leave a diff behind.
+    Returns the files that could not be restored."""
+    bad = []
+    for f in files:
+        path = Path(f["path"])
+        try:
+            if f["backup"]:
+                data = (root / STATE_DIR / BACKUP_DIR / f["backup"]).read_bytes()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            elif path.exists():
+                path.unlink()
+        except OSError as e:
+            bad.append(f"{path} ({e})")
+    return bad
+
+
+def _clear_pending(root: Path) -> None:
+    (root / STATE_DIR / PENDING).unlink(missing_ok=True)
+    shutil.rmtree(root / STATE_DIR / BACKUP_DIR, ignore_errors=True)
+
+
 def recover_pending(root: Path) -> None:
     """Revert a broken-variant patch that an interrupted run left applied."""
     rec_path = root / STATE_DIR / PENDING
     if not rec_path.exists():
         return
     rec = json.loads(rec_path.read_text(encoding="utf-8"))
-    patch = Path(rec["patch"])
-    top, args = _patch_args(root, patch)
-    c, o = git(top, "apply", "-R", "--check", *args)
-    if c != 0:
-        die(f"an interrupted run left {rec['rel']} applied and it no longer reverts cleanly:\n{o}\n"
-            f"Restore the files it touches by hand (git diff), then delete {rec_path}.")
-    git(top, "apply", "-R", *args)
-    rec_path.unlink()
+    if "files" in rec:  # 0.3+: exact backups of every file the patch touches
+        bad = _restore(root, rec["files"])
+        if bad:
+            die(f"an interrupted run left {rec['rel']} applied and these files could not be restored: "
+                f"{', '.join(bad)}. Backups are in {root / STATE_DIR / BACKUP_DIR}; restore them by hand, "
+                f"then delete {rec_path}.")
+    else:  # record written by an older runner: reverse the patch
+        top, args = _patch_args(root, Path(rec["patch"]))
+        c, o = git(top, "apply", "-R", "--check", *args)
+        if c != 0:
+            die(f"an interrupted run left {rec['rel']} applied and it no longer reverts cleanly:\n{o}\n"
+                f"Restore the files it touches by hand (git diff), then delete {rec_path}.")
+        git(top, "apply", "-R", *args)
+    _clear_pending(root)
     warn(f"reverted broken-variant patch {rec['rel']} left applied by an interrupted run")
 
 
 class AppliedPatch:
-    """Context manager: apply a broken-variant patch, always revert it, and prove it changed code."""
+    """Context manager: apply a broken-variant patch, always revert it, and prove it changed code.
+    The touched files are backed up byte for byte first, and the revert restores those bytes."""
 
     def __init__(self, root: Path, rel: str):
         self.root, self.rel, self.patch = root, rel, (root / rel)
         self.top, self.args = _patch_args(root, self.patch)
         self.files: list[Path] = []
+        self.saved: list[dict] = []
         self.before: dict[str, str] = {}
 
     def __enter__(self):
@@ -333,8 +368,19 @@ class AppliedPatch:
             raise VerikitError(f"patch {self.rel} does not apply: {o}", FAILED)
         self.files = _patched_files(self.root, self.patch)
         self.before = _digest(self.files)
-        state_path(self.root, PENDING).write_text(
-            json.dumps({"patch": str(self.patch.resolve()), "rel": self.rel, "at": time.time()}), encoding="utf-8")
+        backups = state_path(self.root, BACKUP_DIR)
+        shutil.rmtree(backups, ignore_errors=True)
+        backups.mkdir()
+        self.saved = []
+        for i, f in enumerate(self.files):
+            name = None
+            if f.exists():
+                name = f"{i}.orig"
+                (backups / name).write_bytes(f.read_bytes())
+            self.saved.append({"path": str(f), "backup": name})
+        state_path(self.root, PENDING).write_text(json.dumps(
+            {"patch": str(self.patch.resolve()), "rel": self.rel, "at": time.time(), "files": self.saved}),
+            encoding="utf-8")
         c, o = git(self.top, "apply", *self.args)
         if c != 0 or _digest(self.files) == self.before:
             self._revert()
@@ -344,10 +390,11 @@ class AppliedPatch:
 
     def _revert(self) -> None:
         if _digest(self.files) != self.before:
-            c, o = git(self.top, "apply", "-R", *self.args)
-            if c != 0 or _digest(self.files) != self.before:
-                die(f"could not revert {self.rel}: {o}. Restore the files by hand (git diff)!")
-        (self.root / STATE_DIR / PENDING).unlink(missing_ok=True)
+            bad = _restore(self.root, self.saved)
+            if bad or _digest(self.files) != self.before:
+                die(f"could not revert {self.rel}: {', '.join(bad) or 'files differ after restore'}. "
+                    f"Backups are in {self.root / STATE_DIR / BACKUP_DIR}; restore the files by hand!")
+        _clear_pending(self.root)
 
     def __exit__(self, *exc):
         self._revert()
@@ -444,11 +491,58 @@ def write_junit(path: str, results: list[dict], total_secs: float) -> None:
     Path(path).write_text(ET.tostring(suites, encoding="unicode"), encoding="utf-8")
 
 
+def ci_target_branch(env=None) -> tuple[str | None, str]:
+    """(target branch of the pull request, CI name), or (None, why) when this build is not a
+    pull request. Reads the variables GitHub Actions, Azure Pipelines and GitLab CI set."""
+    env = os.environ if env is None else env
+    if env.get("GITHUB_ACTIONS"):
+        if env.get("GITHUB_EVENT_NAME", "").startswith("pull_request") and env.get("GITHUB_BASE_REF"):
+            return env["GITHUB_BASE_REF"], "GitHub Actions pull request"
+        return None, "GitHub Actions, not a pull request"
+    if env.get("TF_BUILD") or env.get("BUILD_REASON"):
+        # Azure Repos gives refs/heads/main, GitHub-hosted repos give main
+        target = env.get("SYSTEM_PULLREQUEST_TARGETBRANCHNAME") or env.get("SYSTEM_PULLREQUEST_TARGETBRANCH", "")
+        if env.get("BUILD_REASON") == "PullRequest" and target:
+            return target.removeprefix("refs/heads/"), "Azure Pipelines pull request"
+        return None, "Azure Pipelines, not a pull request"
+    if env.get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME"):
+        return env["CI_MERGE_REQUEST_TARGET_BRANCH_NAME"], "GitLab merge request"
+    return None, "no pull request detected"
+
+
+def ci_base(root: Path, env=None) -> str | None:
+    """The ref a PR build should diff against, or None to run every check. Never returns a
+    ref that cannot be diffed: a missing or shallow base means 'run everything', not 'run nothing'."""
+    branch, where = ci_target_branch(env)
+    if not branch:
+        print(f"[verikit] --ci: {where}; running every check")
+        return None
+    base = f"origin/{branch}"
+    if git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")[0] != 0:
+        try:  # never prompt for credentials in CI; give up quickly instead
+            subprocess.run(["git", "fetch", "--no-tags", "--quiet", "origin",
+                            f"+refs/heads/{branch}:refs/remotes/{base}"], cwd=root, capture_output=True,
+                           timeout=120, env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never"))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if git(root, "merge-base", base, "HEAD")[0] != 0:
+        warn(f"--ci: {where} into {branch}, but {base} is missing or shares no history with HEAD "
+             "(shallow checkout? use fetch-depth 0 / fetchDepth: 0). Running every check instead.")
+        return None
+    print(f"[verikit] --ci: {where} into {branch}; running the checks whose files changed vs {base}")
+    return base
+
+
 def cmd_run(args) -> int:
     root = find_root(args.root)
     recover_pending(root)
     m = load_manifest(root)
     checks = select(m["check"], args.ids, args.tag)
+    if args.ci:
+        if args.changed is not None:
+            die("use --ci or --changed, not both")
+        base = ci_base(root)
+        args.changed = base  # None = not a PR (or no usable base): run everything
     if args.changed is not None:
         checks = changed_checks(root, checks, args.changed)
         if not checks:
@@ -658,8 +752,10 @@ def cmd_hook(args) -> int:
                          "your report that the model was not re-confirmed.")
     if not lines:
         return OK
-    print("\n".join(lines), file=sys.stderr)
-    return 2  # exit 2 = Claude Code shows stderr to the agent and keeps it working
+    # Claude Code's documented JSON block: the agent receives `reason` and keeps working.
+    # (The app shows its own "Stop hook" notice to the user whenever a Stop hook blocks.)
+    print(json.dumps({"decision": "block", "reason": "\n".join(lines)}))
+    return OK
 
 
 # --------------------------------------------------------------------------- TLA+ (TLC)
@@ -1160,6 +1256,40 @@ version = 1
 '''
 
 
+CI_TEMPLATES = {"github": ("github-actions.yml", ".github/workflows/verify.yml"),
+                "azure": ("azure-pipelines.yml", "azure-pipelines.verify.yml")}
+ROOTS_LINE = re.compile(r"(?m)^(?P<pre>[^\r\n#]*?)\[(?P<items>[^\]\r\n]*)\](?P<post>[ \t]*# verikit:roots[^\r\n]*)")
+
+
+def set_ci_roots(text: str, roots: list[str]) -> str:
+    m = ROOTS_LINE.search(text)
+    if not m:
+        die("CI template has no `# verikit:roots` line")
+    line = m["pre"] + "[" + ", ".join(json.dumps(r) for r in roots) + "]" + m["post"]
+    return text[:m.start()] + line + text[m.end():]
+
+
+def add_ci_root(path: Path, root_rel: str) -> str:
+    """Add a verification root to an existing workflow's `# verikit:roots` list."""
+    text = read_keep(path)
+    m = ROOTS_LINE.search(text)
+    if not m:
+        return "no-marker"
+    roots = [r.strip().strip("'\"") for r in m["items"].split(",") if r.strip()]
+    if root_rel in roots:
+        return "present"
+    write_keep(path, set_ci_roots(text, [*roots, root_rel]))
+    return "added"
+
+
+def ci_list(value: str) -> list[str]:
+    names = ["github", "azure"] if value == "both" else [v.strip() for v in value.split(",") if v.strip()]
+    bad = [n for n in names if n not in CI_TEMPLATES]
+    if bad:
+        raise argparse.ArgumentTypeError(f"unknown CI {', '.join(bad)}; use github, azure, github,azure or both")
+    return names
+
+
 def cmd_init(args) -> int:
     root = (args.root or Path.cwd()).resolve()
     top = git_toplevel(root)
@@ -1203,15 +1333,21 @@ def cmd_init(args) -> int:
             settings.parent.mkdir(exist_ok=True)
             write_keep(settings, json.dumps(data, indent=2) + "\n")
             print("added Stop hook to .claude/settings.json")
-    if args.ci:
-        src = KIT_DIR / "templates" / "ci" / ("github-actions.yml" if args.ci == "github" else "azure-pipelines.yml")
-        dest = (top / ".github" / "workflows" / "verify.yml") if args.ci == "github" else (top / "azure-pipelines.verify.yml")
+    for ci in args.ci:
+        src, dest = CI_TEMPLATES[ci]
+        dest = top / dest
+        rel = dest.relative_to(top).as_posix()
+        root_rel = git_prefix(root) or "."
         if dest.exists():
-            print(f"kept existing {dest.relative_to(top).as_posix()}")
+            result = add_ci_root(dest, root_rel)
+            print({"added": f"added root {root_rel} to {rel}",
+                   "present": f"{rel} already runs root {root_rel}",
+                   "no-marker": f"kept existing {rel}; it has no `# verikit:roots` list, so add a step "
+                                f"for root {root_rel} by hand"}[result])
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-            print(f"added {dest.relative_to(top).as_posix()} - edit the setup steps for your stacks")
+            write_keep(dest, set_ci_roots(read_keep(KIT_DIR / "templates" / "ci" / src), [root_rel]))
+            print(f"added {rel} (root {root_rel}) - edit the setup steps for your stacks")
     print("\nnext: in Claude Code run /verify-survey to rank the promises worth verifying, "
           "then /verify-create on the top one.")
     return OK
@@ -1232,6 +1368,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--changed", nargs="?", const="", default=None, metavar="REF",
                    help="only checks whose covered files changed: vs REF...HEAD (e.g. origin/main), "
                         "or vs each check's sync commit when REF is omitted")
+    p.add_argument("--ci", action="store_true",
+                   help="in CI: on a pull request (GitHub Actions, Azure Pipelines, GitLab) run only the "
+                        "checks whose files changed vs the target branch; otherwise run every check")
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--seed", type=int, help="seed exported as VERIKIT_SEED (default: random, printed)")
     p.add_argument("--verbose", "-v", action="store_true")
@@ -1264,7 +1403,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("init", parents=[common], help="scaffold verification/ in this folder")
     p.add_argument("--hook", action="store_true", help="add the Claude Code Stop hook")
-    p.add_argument("--ci", choices=["github", "azure"], help="add a CI workflow template")
+    p.add_argument("--ci", type=ci_list, default=[], metavar="github,azure",
+                   help="add CI workflow(s): github, azure, or both (comma-separated); run again in each "
+                        "monorepo root to add that root to the workflow")
     p.add_argument("--no-skills", dest="skills", action="store_false", help="do not copy the skills")
     p.add_argument("--force", action="store_true", help="overwrite existing skills with the kit's version")
     p.set_defaults(fn=cmd_init)

@@ -1,6 +1,7 @@
-# verikit for GitHub Actions. On pull requests it runs only the checks whose covered code
-# changed; on main it runs everything. Results are JUnit XML, like your other test reports.
-# Keep the setup steps your checks need and delete the rest.
+# verikit for GitHub Actions. On pull requests `run --ci` runs only the checks whose covered
+# code changed vs the PR's base branch; on main it runs everything. Results are JUnit XML.
+# One job per verification root (each folder that holds verification/). `verikit init --ci github`
+# adds each new root to the list marked verikit:roots. Keep the setup steps your checks need.
 name: verify
 on:
   push:
@@ -9,12 +10,19 @@ on:
 
 jobs:
   verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        root: ["."]   # verikit:roots
     # windows-latest if any check runs .NET Framework (net4x) tests; ubuntu-latest otherwise
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ matrix.root }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # stale/--changed need history back to the sync commits
+          fetch-depth: 0            # --ci and stale need history back to the base and sync commits
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -33,19 +41,15 @@ jobs:
         with:
           node-version: 22
       # - run: npm ci                  # install each JS project a check runs in
-      #   working-directory: web
+      #   working-directory: ${{ matrix.root }}/web
       - name: verikit run
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            python verification/verikit.py run --changed "origin/${{ github.base_ref }}" --junit verify-results.xml
-          else
-            python verification/verikit.py run --junit verify-results.xml
-          fi
+        run: python verification/verikit.py run --ci --junit verify-results.xml
       - name: verikit stale
+        if: always()
         run: python verification/verikit.py stale   # add --strict to fail the build on drift
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: verify-results
-          path: verify-results.xml
+          name: verify-results-${{ strategy.job-index }}
+          path: ${{ matrix.root }}/verify-results.xml
+          if-no-files-found: ignore

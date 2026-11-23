@@ -1,5 +1,16 @@
-# verikit for Azure Pipelines (NOT exercised by the kit yet - adjust before relying on it).
-# Results are published as JUnit, so they appear in the run's Tests tab next to your tests.
+# verikit for Azure Pipelines. On pull requests `run --ci` runs only the checks whose covered
+# code changed vs the PR's target branch; on main it runs everything. Results are published as
+# JUnit, so they appear in the run's Tests tab next to your other tests.
+# Runs every verification root (each folder that holds verification/) in one job.
+# `verikit init --ci azure` adds each new root to the list marked verikit:roots.
+#
+# Pull requests: the `pr:` trigger below works for GitHub and Bitbucket repos. For Azure Repos,
+# the YAML pr trigger is not used: add this pipeline as a Build validation branch policy on main.
+parameters:
+  - name: roots
+    type: object
+    default: ["."]   # verikit:roots
+
 trigger:
   branches:
     include: [main]
@@ -8,32 +19,49 @@ pr:
     include: [main]
 
 pool:
-  vmImage: windows-latest   # needed for .NET Framework (net4x) tests; ubuntu-latest otherwise
+  vmImage: ubuntu-latest   # windows-latest if any check runs .NET Framework (net4x) tests
+
+variables:
+  VERIKIT_CACHE: $(Pipeline.Workspace)/.verikit-cache   # where the checksummed tla2tools.jar is kept
 
 steps:
   - checkout: self
-    fetchDepth: 0            # stale/--changed need history back to the sync commits
+    fetchDepth: 0            # --ci and stale need history back to the target and sync commits
   - task: UsePythonVersion@0
     inputs:
       versionSpec: "3.12"
-  - task: UseDotNet@2
+  - task: JavaToolInstaller@0   # TLA+ checks (TLC needs Java 11+)
+    inputs:
+      versionSpec: "21"
+      jdkArchitectureOption: x64
+      jdkSourceOption: PreInstalled
+  - task: Cache@2
+    inputs:
+      key: '"verikit-tla" | "1.7.4"'
+      path: $(VERIKIT_CACHE)
+  - task: UseDotNet@2        # .NET checks
     inputs:
       packageType: sdk
       version: 8.0.x
-  - task: NodeTool@0
+  - task: NodeTool@0         # Node / React / Angular checks
     inputs:
       versionSpec: 22.x
-  # TLA+ checks need Java 11+. Microsoft-hosted images ship a JDK; if `java` is not on PATH,
-  # set VERIKIT_JAVA to its java.exe, e.g. $(JAVA_HOME_21_X64)\bin\java.exe
-  # - script: npm ci
-  #   workingDirectory: web
-  - script: python verification/verikit.py run --junit $(Common.TestResultsDirectory)/verify-results.xml
-    displayName: verikit run
-  - script: python verification/verikit.py stale
-    displayName: verikit stale
+  # - script: npm ci         # install each JS project a check runs in
+  #   workingDirectory: $(Build.SourcesDirectory)/web
+  - ${{ each root in parameters.roots }}:
+      - script: python verification/verikit.py run --ci --junit verify-results.xml
+        displayName: verikit run (${{ root }})
+        workingDirectory: $(Build.SourcesDirectory)/${{ root }}
+        condition: succeededOrFailed()   # one failing root does not hide the others
+      - script: python verification/verikit.py stale
+        displayName: verikit stale (${{ root }})   # add --strict to fail the build on drift
+        workingDirectory: $(Build.SourcesDirectory)/${{ root }}
+        condition: succeededOrFailed()
   - task: PublishTestResults@2
-    condition: always()
+    condition: succeededOrFailed()
     inputs:
       testResultsFormat: JUnit
-      testResultsFiles: $(Common.TestResultsDirectory)/verify-results.xml
+      testResultsFiles: "**/verify-results.xml"
+      searchFolder: $(Build.SourcesDirectory)
+      mergeTestResults: true
       testRunTitle: verikit
