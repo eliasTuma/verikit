@@ -25,7 +25,9 @@ assumes = [
   "Between two SQL statements redeemCoupon() only computes: it awaits nothing else (no HTTP call, no timer).",
   "Lost connections, statement timeouts and crashes in the middle of a transaction are out of scope.",
 ]
-timeout = 600
+# Longer than the helper's own limits added up (image pull 300 s + start 210 s + test 180 s),
+# so the helper always stops by itself and removes its container before verikit gives up.
+timeout = 900
 synced_commit = ""
 
   [[check.must_fail]]

@@ -39,11 +39,12 @@ doing the same, PostgreSQL makes the second statement wait for the first one's r
 looks at the row again. It is used by then, so no row comes back and the second order gets no
 discount.
 
-The other common guard is `SELECT ... FOR UPDATE` and then a plain `UPDATE`. It also works, but
-the check and the write are two statements, and the safety hangs on two words that a later edit
-can drop without any single-request test noticing. That is exactly the first broken variant
-below. The conditional `UPDATE` keeps check and write in one statement, holds the row lock for a
-shorter time, and reads the same in SQL Server and MySQL.
+The other common guard is `SELECT ... FOR UPDATE` and then a plain `UPDATE` (not run here). With
+it the check and the write are two statements, and the safety hangs on two words that a later
+edit can drop without any single-request test noticing. Without those two words it is exactly
+the first broken variant below. The conditional `UPDATE` keeps check and write in one statement,
+so they cannot drift apart. The idea (a conditional update, then look at how many rows changed)
+exists in other engines too, but the text differs: `RETURNING` is PostgreSQL syntax.
 
 ### How the scheduler orders real SQL statements
 
@@ -91,8 +92,9 @@ COUPON_DATABASE_URL=postgres://user:password@127.0.0.1:5432/testdb npm test
 COUPON_DATABASE_URL=postgres://user:password@127.0.0.1:5432/testdb python verification/verikit.py run
 ```
 
-The tests create a schema `coupon_test_<pid>_<time>` there and drop it at the end; they touch
-nothing else. Without `COUPON_DATABASE_URL` and without the helper the tests **fail**; they never skip.
+The tests create a schema `coupon_test_<pid>_<time>` there, work only inside it, and drop it at
+the end. A test process that is killed leaves its schema behind; drop it by hand. Without
+`COUPON_DATABASE_URL` and without the helper the tests **fail**; they never skip.
 
 ## What a failure looks like
 
@@ -128,7 +130,7 @@ overwrote A's row, because nothing in it checks again.
 
 ## Measured
 
-On Windows 11 with Docker Desktop 29.8 (Linux containers), Node 22.13, `pg` 8.23.1,
+On Windows 11 with Docker Desktop (Docker Engine 29.8.0, Linux containers), Node 22.13, `pg` 8.23.1,
 fast-check 4.11.0, PostgreSQL 16.15 (`postgres:16-alpine`):
 
 | | |
@@ -137,7 +139,7 @@ fast-check 4.11.0, PostgreSQL 16.15 (`postgres:16-alpine`):
 | Variant without `AND redeemed_by IS NULL` | found in 50 of 50 seeds, on schedule 1 |
 | Correct code | 10 seeds x 200 schedules, no failure |
 | Statement orders in one passing run | 24 different orders in 200 schedules, with each of the 6 seeds looked at. By counting, 24 is every order this code can produce for two callers (12 per winner). In about 6 of 10 schedules a statement waited for the other connection's row lock. |
-| Same seed, run twice | the same statement orders and the same lock waits, in all 260 seeds compared |
+| Same seed, run twice | correct code, 10 seeds x 200 schedules: the same statement orders and the same lock waits both times. The variant runs repeated too, but they stop after 1-5 schedules. |
 | One passing run of 200 schedules | 5-7 s, about 30 ms per schedule (some 15 round trips to the database). Once 41 s, while other containers kept the machine busy. |
 | Start PostgreSQL in Docker, wait until ready, remove it | 3-4 s per run, image already pulled |
 | `verikit run` (holds + 2 variants = three containers) | 19-22 s; up to 34 s on the busy machine |
@@ -147,9 +149,12 @@ because the window is wide (B only has to read before A commits). The 200 schedu
 passing run.
 
 The Node check has run on Windows 11 with Docker Desktop only. The helper script alone also ran
-on Linux (Ubuntu under WSL 2, Docker Engine 29.1, Python 3.14): normal run, failing command,
-timeout, SIGINT, SIGTERM, and a SIGKILL of the helper, after which the container removed itself.
-The kit's CI job for this example has not run yet.
+on Linux (Ubuntu under WSL 2, Docker Engine 29.1, Python 3.14): a first run that pulls the image
+(47 s), normal run, failing command, timeout, SIGINT, SIGTERM, and a SIGKILL of the helper, after
+which the container removed itself. The kit's CI job for this example has not run yet.
+
+`postgres:16-alpine` is a moving tag: it follows the 16.x minor releases. The runs above used
+16.15; the fresh pull on Linux got 16.16. The test prints the server version it ran on.
 
 ## Limits
 
