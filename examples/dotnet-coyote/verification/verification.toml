@@ -1,0 +1,37 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "giftcard-redeem-once"
+rule = "A gift card is redeemed at most once, even when two requests for it arrive at the same time."
+harm = "The card's balance is paid out twice (two orders get the money): direct loss, and a gift-card fraud pattern once people notice."
+level = "code"
+tool = "Microsoft Coyote 1.7.11 + xUnit: systematic exploration of the real async interleavings of GiftCardService.RedeemAsync (net8.0, binary-rewritten after build)"
+tags = ["payments", "concurrency"]
+run = "dotnet test tests/GiftCards.Tests --filter Category=Verification"
+covers = ["src/GiftCards/**/*.cs"]
+harness = [
+  "tests/GiftCards.Tests/GiftCardRaceVerificationTests.cs",
+  "tests/GiftCards.Tests/Fakes.cs",
+  "tests/GiftCards.Tests/GiftCards.Tests.csproj",
+  "tests/GiftCards.Tests/rewrite.coyote.json",
+  ".config/dotnet-tools.json",
+]
+bounds = "2 concurrent RedeemAsync requests for 1 card; 1000 schedules per run, Coyote 'random' strategy seeded from VERIKIT_SEED; sampling of schedules, not exhaustive"
+assumes = [
+  "The service runs as a single instance: the SemaphoreSlim guard lives in one process. A second instance (or a second GiftCardService object) needs a database-level guard, which this check does not see.",
+  "The card store and order ledger are in-memory fakes that await once per call, like a database round trip; real database isolation and transactions are not modelled.",
+  "Only the product and test dlls are rewritten; anything Coyote cannot control is reported as an error, not skipped.",
+]
+timeout = 600
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: no SemaphoreSlim, so read-check-write of two requests can interleave (the classic check-then-act race)"
+  patch = "verification/giftcards/mutants/no-redeem-gate.patch"
+  match = 'gift card GC-100 redeemed [2-9] times'
+
+  [[check.must_fail]]
+  why = "Broken variant: the 'already redeemed' check is gone, so the second request redeems again"
+  patch = "verification/giftcards/mutants/no-already-redeemed-check.patch"
+  match = 'gift card GC-100 redeemed [2-9] times'

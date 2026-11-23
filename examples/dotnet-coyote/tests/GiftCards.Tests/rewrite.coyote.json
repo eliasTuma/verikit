@@ -1,0 +1,7 @@
+{
+  "AssembliesPath": ".",
+  "Assemblies": [
+    "GiftCards.dll",
+    "GiftCards.Tests.dll"
+  ]
+}
