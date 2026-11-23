@@ -1,0 +1,6 @@
+# How scripts/check_examples.py runs this example.
+# The check starts postgres:16-alpine in Docker (Linux containers) and removes it afterwards;
+# the first run on a machine also pulls that image. In the kit's CI this runs on
+# ubuntu-latest only: GitHub's Windows runners cannot run Linux containers.
+setup = "npm ci --no-audit --no-fund"
+needs = ["node", "npm", "docker"]

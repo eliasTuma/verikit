@@ -1,0 +1,13 @@
+diff --git a/src/coupons.js b/src/coupons.js
+index c186f44..7ce44e3 100644
+--- a/src/coupons.js
++++ b/src/coupons.js
+@@ -15,7 +15,7 @@ export async function redeemCoupon(db, code, orderId) {
+     const claimed = await db.query(
+       `UPDATE coupons
+           SET redeemed_by = $1, redeemed_at = now()
+-        WHERE code = $2 AND redeemed_by IS NULL
++        WHERE code = $2
+     RETURNING amount_cents`,
+       [orderId, code],
+     );
