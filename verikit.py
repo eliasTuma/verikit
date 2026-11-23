@@ -777,6 +777,47 @@ class AppliedVariant:
 
 # --------------------------------------------------------------------------- run
 
+SEEDS_DIR = Path("verification") / "seeds"
+
+
+def saved_seeds(root: Path, check_id: str) -> list[int]:
+    """Seeds of cases that broke the rule once (verification/seeds/<id>.txt, one per line,
+    `#` comments). `run` replays each of them every time, so a found bug cannot come back."""
+    try:
+        lines = (root / SEEDS_DIR / f"{check_id}.txt").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    seeds = []
+    for line in lines:
+        token = line.split("#")[0].strip()
+        if token.lstrip("-").isdigit() and int(token) not in seeds:
+            seeds.append(int(token))
+    return seeds
+
+
+def cmd_seed(args) -> int:
+    root = find_root(args.root)
+    m = load_manifest(root)
+    if args.action == "list":
+        for c in select(m["check"], [args.id] if args.id else []):
+            print(f"{c['id']}: {', '.join(map(str, saved_seeds(root, c['id']))) or 'no saved seeds'}")
+        return OK
+    if not args.id or args.seed is None:
+        die("usage: verikit seed add ID SEED [--note TEXT]")
+    select(m["check"], [args.id])
+    if args.seed in saved_seeds(root, args.id):
+        print(f"seed {args.seed} is already saved for {args.id}")
+        return OK
+    path = root / SEEDS_DIR / f"{args.id}.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_keep(path) if path.exists() else \
+        f"# Seeds of cases that once broke check {args.id}. `verikit run` replays every one, every time.\n"
+    note = f"  # {args.note}" if args.note else ""
+    write_keep(path, existing + ("" if existing.endswith("\n") else "\n") + f"{args.seed}{note}\n")
+    print(f"saved seed {args.seed} in {path.relative_to(root).as_posix()}; commit it")
+    return OK
+
+
 def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | None) -> dict:
     timeout = int(check.get("timeout", timeout))
     result = {"id": check["id"], "rule": check["rule"], "ok": True, "steps": []}
@@ -795,9 +836,24 @@ def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | 
     print(f"   {'[ok]  ' if passed else '[FAIL]'} holds on the current code ({secs:.1f}s, exit {code})")
     if not passed or verbose:
         print(tail(out))
+    if not passed and seed is not None:
+        print(f"          to replay this case on every future run (if the test reads VERIKIT_SEED): "
+              f"{self_cmd(root)} seed add {check['id']} {seed}")
     result["steps"].append({"what": "holds on the current code", "ok": passed, "exit": code,
                             "seconds": round(secs, 2), "output": tail(out, 60)})
     result["ok"] &= passed
+
+    for saved in saved_seeds(root, check["id"]):   # cases that failed once: replayed forever
+        if saved == seed:
+            continue
+        code, out, secs = run_shell(main_cmd, root, timeout, saved, src_env)
+        ok = code == 0
+        print(f"   {'[ok]  ' if ok else '[FAIL]'} holds with saved seed {saved} ({secs:.1f}s, exit {code})")
+        if not ok or verbose:
+            print(tail(out))
+        result["steps"].append({"what": f"holds with saved seed {saved}", "ok": ok, "exit": code,
+                                "seconds": round(secs, 2), "output": tail(out, 60)})
+        result["ok"] &= ok
 
     for mf in check["must_fail"]:
         why = mf.get("why", "broken variant")
@@ -1907,6 +1963,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--seed", type=int)
     p.set_defaults(fn=cmd_sync)
+
+    p = sub.add_parser("seed", parents=[common], help="keep the seed of a failing case; `run` replays saved seeds")
+    p.add_argument("action", choices=["add", "list"])
+    p.add_argument("id", nargs="?")
+    p.add_argument("seed", nargs="?", type=int)
+    p.add_argument("--note", help="what this case is, e.g. 'late reply after retry'")
+    p.set_defaults(fn=cmd_seed)
 
     p = sub.add_parser("list", parents=[common], help="show every check")
     p.add_argument("--tag", action="append", default=[])

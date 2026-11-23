@@ -741,6 +741,53 @@ class CiMode(unittest.TestCase):
         self.assertEqual(vk("run", "--root", str(self.r.root), "--ci", "--changed")[0], 2)
 
 
+class SavedSeeds(unittest.TestCase):
+    """A random run that finds a bug prints its seed; `seed add` keeps it, and every later run
+    replays it, so the same bug cannot come back unnoticed."""
+
+    SEEDED_CHECK = textwrap.dedent("""
+        import os, sys
+        text = open("src/app.txt").read()
+        if "BROKEN" in text:
+            print("RULE BROKEN: guard missing"); sys.exit(1)
+        if "rare bug" in text and os.environ.get("VERIKIT_SEED") == "13":
+            print("RULE BROKEN: only this ordering finds it"); sys.exit(1)
+        print("rule holds")
+    """)
+
+    def setUp(self):
+        self.r = Repo(GOOD)
+        self.r.make_patch()
+        (self.r.root / "check.py").write_text(self.SEEDED_CHECK, encoding="utf-8")
+        (self.r.root / "src" / "notes.txt").write_text("rare bug\n", encoding="utf-8")
+        (self.r.root / "check.py").write_text(self.SEEDED_CHECK.replace("src/app.txt", "src/notes.txt")
+                                              .replace('if "BROKEN" in text', 'if "BROKEN" in open("src/app.txt").read()'),
+                                              encoding="utf-8")
+
+    def tearDown(self):
+        self.r.close()
+
+    def test_failing_seed_is_kept_and_replayed_until_fixed(self):
+        root = str(self.r.root)
+        self.assertEqual(vk("run", "--root", root, "--seed", "5")[0], 0)        # most seeds miss the bug
+        code, out = vk("run", "--root", root, "--seed", "13")
+        self.assertEqual(code, 1, out)
+        self.assertIn("seed add guard 13", out)                                  # tells how to keep the case
+        code, out = vk("seed", "add", "guard", "13", "--root", root, "--note", "late reply")
+        self.assertEqual(code, 0, out)
+        self.assertIn("13  # late reply", (self.r.root / "verification" / "seeds" / "guard.txt").read_text(encoding="utf-8"))
+        code, out = vk("run", "--root", root, "--seed", "5")
+        self.assertEqual(code, 1, out)                                           # now every run finds it
+        self.assertIn("[FAIL] holds with saved seed 13", out)
+        (self.r.root / "src" / "notes.txt").write_text("fixed\n", encoding="utf-8")
+        code, out = vk("run", "--root", root, "--seed", "5")
+        self.assertEqual(code, 0, out)
+        self.assertIn("[ok]   holds with saved seed 13", out)
+        self.assertIn("guard: 13", vk("seed", "list", "--root", root)[1])
+        self.assertIn("already saved", vk("seed", "add", "guard", "13", "--root", root)[1])
+        self.assertEqual(vk("seed", "add", "nope", "1", "--root", root)[0], 2)
+
+
 CROSS = GOOD.replace('covers = ["src/**/*.txt"]', 'covers = ["src/**/*.txt", "web:src/**/*.ts"]') + """
     [sources.web]
     path = "../../web"

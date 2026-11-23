@@ -7,6 +7,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 3 * * *"   # nightly: every check with a new random seed. A failure prints the seed;
+                          # keep it with `verikit seed add <id> <seed>` so every later run replays it
 
 jobs:
   verify:

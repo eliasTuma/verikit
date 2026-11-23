@@ -17,6 +17,12 @@ trigger:
 pr:
   branches:
     include: [main]
+schedules:
+  - cron: "0 3 * * *"       # nightly: every check with a new random seed. A failure prints the seed;
+    displayName: nightly    # keep it with `verikit seed add <id> <seed>` so every later run replays it
+    branches:
+      include: [main]
+    always: "true"       # run even when nothing changed since the last night
 
 pool:
   vmImage: ubuntu-latest   # windows-latest if any check runs .NET Framework (net4x) tests
