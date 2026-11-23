@@ -158,6 +158,9 @@ def load_manifest(root: Path) -> dict:
             if m and m.group(1) not in sources:
                 die(f"check {c['id']!r}: {pattern!r} names a repository {m.group(1)!r}, but the manifest has no "
                     f"[sources.{m.group(1)}] table. Add one with `path = \"../{m.group(1)}\"`.")
+            path, symbol = split_anchor(pattern)
+            if symbol and re.search(r"[*?\[]", path):
+                die(f"check {c['id']!r}: {pattern!r} - `#{symbol}` needs one exact file, not a glob")
         if not c["must_fail"]:
             warn(f"check {c['id']!r} has no [[check.must_fail]] - a check you have never seen fail proves nothing.")
         for j, mf in enumerate(c["must_fail"]):
@@ -228,7 +231,7 @@ def source_dir(root: Path, check: dict, name: str) -> Path | None:
 
 
 def pathspecs(check: dict) -> list[str]:
-    return [f":(glob){p}" for p in watched(check)]
+    return [f":(glob){split_anchor(p)[0]}" for p in watched(check)]
 
 
 def content_digest(data: bytes) -> str:
@@ -278,10 +281,17 @@ def current_items(root: Path, check: dict) -> tuple[dict[str, str], list[str]]:
     the code: covered and harness files here, `name:path` files in other repositories, and the
     check's own verification files. Second value: notes for repositories with no checkout."""
     items: dict[str, str] = {}
-    for f in _git_files(root, watched(check)):
-        p = root / f
-        if p.is_file():
-            items[f] = content_digest(p.read_bytes())
+
+    def add(folder: Path, entries: list[str], prefix: str) -> None:
+        split = [split_anchor(e) for e in entries]
+        for f in _git_files(folder, [path for path, symbol in split if symbol is None]):
+            if (folder / f).is_file():
+                items[prefix + f] = content_digest((folder / f).read_bytes())
+        for path, symbol in split:
+            if symbol is not None:      # only that function or class, not the whole file
+                items[f"{prefix}{path}#{symbol}"] = anchor_digest(folder / path, symbol)
+
+    add(root, watched(check), "")
     for p in check_files(root, check):
         items[p.resolve().relative_to(root.resolve()).as_posix()] = content_digest(p.read_bytes())
     notes = []
@@ -291,9 +301,7 @@ def current_items(root: Path, check: dict) -> tuple[dict[str, str], list[str]]:
             notes.append(f"{MISSING}{name}: no git checkout at {check['_sources'][name]['path']}; "
                          f"clone it there or set {source_env(name)})")
             continue
-        for f in _git_files(src, globs):
-            if (src / f).is_file():
-                items[f"{name}:{f}"] = content_digest((src / f).read_bytes())
+        add(src, globs, f"{name}:")
     return items, notes
 
 
@@ -309,6 +317,168 @@ def fingerprint(root: Path, check: dict) -> str:
     items, notes = current_items(root, check)
     return hashlib.sha256((json.dumps(meaning, sort_keys=True, default=str) + items_hash(items)
                            + "".join(notes)).encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- anchors (path#Symbol)
+
+ANCHOR = re.compile(r"^(?P<path>.+)#(?P<symbol>[A-Za-z_$][\w$]*)$")
+NO_ANCHOR = "(anchor not found)"
+
+
+def split_anchor(entry: str) -> tuple[str, str | None]:
+    """`src/Checkout.cs#PayForOrder` -> (path, symbol). The check then watches only that
+    function or class, not the whole file. A '#' followed by a path separator is a folder name."""
+    m = ANCHOR.match(entry)
+    return (m["path"], m["symbol"]) if m else (entry, None)
+
+
+def _skip_literal(text: str, i: int) -> int:
+    """If text[i] starts a comment or a string, the index just past it; else i."""
+    two = text[i:i + 2]
+    if two == "//":
+        j = text.find("\n", i)
+        return len(text) if j < 0 else j
+    if two == "/*":
+        j = text.find("*/", i + 2)
+        return len(text) if j < 0 else j + 2
+    ch = text[i]
+    if ch in "\"'`":
+        verbatim = ch == '"' and i > 0 and text[i - 1] in "@$" and "@" in text[max(0, i - 2):i]
+        j = i + 1
+        while j < len(text):
+            if verbatim and text[j] == '"':
+                if text[j + 1:j + 2] == '"':
+                    j += 2
+                    continue
+                return j + 1
+            if not verbatim and text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == ch or (text[j] == "\n" and ch != "`" and not verbatim):
+                return j + 1
+            j += 1
+        return len(text)
+    return i
+
+
+def _body_end(text: str, i: int) -> tuple[int, str] | None:
+    """From just after a declared name: (index past the body, kind). kind "block": the matching
+    '}' of its first '{'. kind "expr": the ';' that ends an expression body. None if neither."""
+    depth = 0          # () and [] nesting, so a ';' or '{' inside parameters does not count
+    while i < len(text):
+        j = _skip_literal(text, i)
+        if j != i:
+            i = j
+            continue
+        ch = text[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif ch == ";" and depth <= 0:
+            return i + 1, "expr"
+        elif ch == "}" and depth <= 0:
+            return None                      # the enclosing block ended first: not a declaration
+        elif ch == "{" and depth <= 0:
+            level = 0
+            while i < len(text):
+                j = _skip_literal(text, i)
+                if j != i:
+                    i = j
+                    continue
+                if text[i] == "{":
+                    level += 1
+                elif text[i] == "}":
+                    level -= 1
+                    if level == 0:
+                        return i + 1, "block"
+                i += 1
+            return None
+        i += 1
+    return None
+
+
+CALL_BEFORE = re.compile(r"(\.|\(|\)|\[|,|=|\breturn|\bnew|\bawait|\bthrow|\byield|\belse|\bdo|!|&&|\|\||\?|:|\+|-|\*|/|<)\s*$")
+ASSIGNED_BEFORE = re.compile(r"\b(const|let|var|static|readonly|public|private|protected|export)\b[^=;(]*$")
+
+
+def extract_region(text: str, symbol: str, suffix: str = "") -> str | None:
+    """The source of every declaration named `symbol` in `text`, or None when there is none.
+    1. Explicit markers win, in any language: a line with `verikit:begin NAME` ... `verikit:end NAME`.
+    2. Python: `def NAME` / `class NAME` with its indented body.
+    3. Brace languages (C#, Java, JS/TS, Go, ...): `NAME(...) {...}`, `class NAME {...}`,
+       `NAME = (...) => ...`, with the attribute/decorator lines directly above.
+    Overloads are all included, so adding or changing any of them counts as a change."""
+    text = text.replace("\r\n", "\n")
+    lines = text.split("\n")
+    name = symbol
+    begin = [n for n, ln in enumerate(lines) if re.search(rf"verikit:begin\s+{re.escape(symbol)}\b", ln)]
+    if begin:
+        end = [n for n, ln in enumerate(lines) if re.search(rf"verikit:end\s+{re.escape(symbol)}\b", ln)]
+        if len(begin) != 1 or len(end) != 1 or end[0] < begin[0]:
+            return None
+        return "\n".join(ln.rstrip() for ln in lines[begin[0]:end[0] + 1])
+    regions: list[str] = []
+    if suffix == ".py":
+        for n, ln in enumerate(lines):
+            m = re.match(rf"^(\s*)(async\s+)?(def|class)\s+{re.escape(name)}\b", ln)
+            if not m:
+                continue
+            start = n
+            while start > 0 and lines[start - 1].strip().startswith("@"):
+                start -= 1
+            stop = n + 1
+            while stop < len(lines) and (not lines[stop].strip() or len(lines[stop]) - len(lines[stop].lstrip()) > len(m.group(1))):
+                stop += 1
+            regions.append("\n".join(ln.rstrip() for ln in lines[start:stop]).rstrip())
+        return "\n\n".join(regions) or None
+    offsets, pos = [], 0
+    for ln in lines:
+        offsets.append(pos)
+        pos += len(ln) + 1
+    i, done_until = 0, -1
+    pattern = re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])")
+    while i < len(text):
+        j = _skip_literal(text, i)
+        if j != i:
+            i = j
+            continue
+        m = pattern.match(text, i)
+        if not m or i < done_until:
+            i += 1
+            continue
+        line_no = text.count("\n", 0, i)
+        before = text[offsets[line_no]:i]
+        after = text[m.end():m.end() + 200].lstrip()
+        is_type = re.search(r"\b(class|interface|struct|enum|record|namespace|module|trait|impl)\s+$", before)
+        is_func = (after.startswith("(") or after.startswith("<")) and not CALL_BEFORE.search(before)
+        is_assigned = re.match(r"[:=]\s*(async\b\s*)?(function\b|\(|[\w$]+\s*=>)", after) and \
+            (ASSIGNED_BEFORE.search(before) or not before.strip())
+        if not (is_type or is_func or is_assigned):
+            i = m.end()
+            continue
+        found = _body_end(text, m.end())
+        # a body in braces, or `=> expression;`. `Name(args);` alone is a call, not a declaration.
+        if found is None or (found[1] == "expr" and "=>" not in text[m.end():found[0]]):
+            i = m.end()
+            continue
+        end = found[0]
+        start = line_no
+        while start > 0 and re.match(r"\s*(\[|@)", lines[start - 1]):
+            start -= 1
+        end_line = text.count("\n", 0, end)
+        regions.append("\n".join(ln.rstrip() for ln in lines[start:end_line + 1]))
+        done_until = end
+        i = end
+    return "\n\n".join(regions) or None
+
+
+def anchor_digest(path: Path, symbol: str) -> str:
+    try:
+        region = extract_region(path.read_text(encoding="utf-8", errors="replace"), symbol, path.suffix)
+    except OSError:
+        region = None
+    return content_digest(region.encode()) if region else NO_ANCHOR
 
 
 # --------------------------------------------------------------------------- sync records
@@ -763,7 +933,8 @@ def stale_info(root: Path, check: dict) -> tuple[str, list[str]]:
     absent = [name for name in source_globs(check) if source_dir(root, check, name) is None]
     if "files" in rec:
         old = {k: v for k, v in rec["files"].items() if not any(k.startswith(n + ":") for n in absent)}
-        changed = sorted(k for k in old.keys() | items.keys() if old.get(k) != items.get(k))
+        changed = sorted(f"{k} {NO_ANCHOR}: renamed or moved?" if items.get(k) == NO_ANCHOR else k
+                         for k in old.keys() | items.keys() if old.get(k) != items.get(k))
     elif absent:
         changed = []
     else:
@@ -841,6 +1012,10 @@ def cmd_sync(args) -> int:
                 die(f"{c['id']}: it covers files in {name!r}, but there is no git checkout at "
                     f"{c['_sources'][name]['path']}. Clone it there or set {source_env(name)}.")
         before, _ = current_items(root, c)
+        lost = [k for k, v in before.items() if v == NO_ANCHOR]
+        if lost:
+            die(f"{c['id']}: no declaration found for {', '.join(lost)}. Fix the name in covers/harness "
+                "(or mark the region with `verikit:begin NAME` / `verikit:end NAME` comments) before syncing.")
         r = run_check(root, c, args.timeout, False, args.seed)
         if not r["ok"]:
             die(f"{c['id']} does not pass, so its sync record is unchanged", FAILED)

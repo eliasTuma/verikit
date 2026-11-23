@@ -476,6 +476,101 @@ class SyncSurvivesHistoryRewrites(unittest.TestCase):
         self.assertIn("sync guard", out)
 
 
+SERVICE_JS = """\
+import { log } from './log.js';
+
+export function helper(x) {
+  return x + 1;
+}
+
+export async function payForOrder(order, gateway) {
+  const key = `order-${order.id}`;
+  if (isPaid(order)) { return order.receipt; }
+  return gateway.charge(order, key);
+}
+
+payForOrder({ id: 1 }, null);
+"""
+
+SERVICE_CS = """\
+public class CheckoutService {
+    [Authorize]
+    public async Task<Receipt> PayForOrder(Order order) {
+        var key = "order-" + order.Id;   // { not a brace
+        return await _gateway.Charge(order, key);
+    }
+
+    public Task<Receipt> PayForOrder(Order order, int retries) => PayForOrder(order);
+
+    public void Other() { PayForOrder(null); var s = "}"; }
+}
+"""
+
+
+class AnchoredCovers(unittest.TestCase):
+    """`covers = ["file#Function"]` watches one function, so unrelated edits in a big file are
+    not drift. A wrong region must never read as "synced"."""
+
+    def test_region_is_the_declaration_not_its_call_sites(self):
+        region = verikit.extract_region(SERVICE_JS, "payForOrder", ".js")
+        self.assertTrue(region.startswith("export async function payForOrder"))
+        self.assertTrue(region.rstrip().endswith("}"))
+        self.assertNotIn("payForOrder({ id: 1 }", region)
+        self.assertNotIn("helper", region)
+
+    def test_overloads_and_attributes_are_all_included(self):
+        region = verikit.extract_region(SERVICE_CS, "PayForOrder", ".cs")
+        self.assertIn("[Authorize]", region)                 # an attribute change is a behaviour change
+        self.assertIn("int retries) => PayForOrder(order);", region)
+        self.assertNotIn("Other()", region)
+
+    def test_python_and_marker_comments(self):
+        py = "import os\n\n@cached\ndef pay(order):\n    key = order.id\n\n    return key\n\ndef other():\n    pay(1)\n"
+        self.assertEqual(verikit.extract_region(py, "pay", ".py"),
+                         "@cached\ndef pay(order):\n    key = order.id\n\n    return key")
+        sql = "SELECT 1;\n-- verikit:begin redeem\nUPDATE c SET x = 1;\n-- verikit:end redeem\nSELECT 2;\n"
+        self.assertIn("UPDATE c SET x = 1;", verikit.extract_region(sql, "redeem", ".sql"))
+        self.assertNotIn("SELECT 2", verikit.extract_region(sql, "redeem", ".sql"))
+
+    def test_missing_name_is_none_never_empty(self):
+        self.assertIsNone(verikit.extract_region(SERVICE_JS, "refundOrder", ".js"))
+        self.assertIsNone(verikit.extract_region(SERVICE_JS, "isPaid", ".js"))   # only called, never declared
+
+    def test_edit_outside_is_not_drift_edit_inside_is_and_a_rename_is_loud(self):
+        r = Repo(GOOD.replace('covers = ["src/**/*.txt"]', 'covers = ["src/app.txt", "src/service.js#payForOrder"]'))
+        try:
+            r.make_patch()
+            service = r.root / "src" / "service.js"
+            service.write_text(SERVICE_JS, encoding="utf-8")
+            self.assertEqual(vk("sync", "guard", "--root", str(r.root))[0], 0)
+            service.write_text(SERVICE_JS.replace("return x + 1;", "return x + 2;"), encoding="utf-8")
+            code, out = vk("stale", "--root", str(r.root), "--strict")
+            self.assertEqual(code, 0, out)                                   # another function changed
+            service.write_text(SERVICE_JS.replace("gateway.charge(order, key)", "gateway.charge(order)"),
+                               encoding="utf-8")
+            code, out = vk("stale", "--root", str(r.root), "--strict")
+            self.assertEqual(code, 1, out)
+            self.assertIn("changed: src/service.js#payForOrder", out)
+            service.write_text(SERVICE_JS.replace("function payForOrder", "function chargeOrder"), encoding="utf-8")
+            code, out = vk("stale", "--root", str(r.root), "--strict")
+            self.assertEqual(code, 1, out)
+            self.assertIn("anchor not found", out)
+            code, out = vk("sync", "guard", "--root", str(r.root))           # and it cannot be synced away
+            self.assertEqual(code, 2, out)
+            self.assertIn("no declaration found", out)
+        finally:
+            r.close()
+
+    def test_anchor_on_a_glob_is_rejected(self):
+        r = Repo(GOOD.replace('covers = ["src/**/*.txt"]', 'covers = ["src/**/*.js#pay"]'))
+        try:
+            code, out = vk("list", "--root", str(r.root))
+            self.assertEqual(code, 2)
+            self.assertIn("one exact file", out)
+        finally:
+            r.close()
+
+
 class HookBlamesOnlyItsSession(unittest.TestCase):
     def setUp(self):
         self.r = Repo(GOOD)
