@@ -28,7 +28,6 @@ assumes = [
 # Longer than the helper's own limits added up (image pull 300 s + start 210 s + test 180 s),
 # so the helper always stops by itself and removes its container before verikit gives up.
 timeout = 900
-synced_commit = ""
 
   [[check.must_fail]]
   why = "Broken variant: check-then-act (SELECT, decide in JavaScript, then an UPDATE that no longer checks)"
