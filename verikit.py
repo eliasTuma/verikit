@@ -44,7 +44,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"  # official v1.7.4 asset
@@ -137,6 +137,9 @@ def load_manifest(root: Path) -> dict:
         c.setdefault("must_fail", [])
         c.setdefault("synced_commit", "")
         c.setdefault("tags", [])
+        c.setdefault("harness", [])
+        if not isinstance(c["harness"], list):
+            die(f"check {c['id']!r}: `harness` must be a list of globs (the check's own test/model files)")
         if not c["must_fail"]:
             warn(f"check {c['id']!r} has no [[check.must_fail]] - a check you have never seen fail proves nothing.")
         for j, mf in enumerate(c["must_fail"]):
@@ -167,29 +170,58 @@ def select(checks: list[dict], ids: list[str], tags: list[str] | None = None) ->
     return chosen
 
 
+def watched(check: dict) -> list[str]:
+    """Globs whose changes make a check stale: the product code it describes (`covers`) and
+    the check's own test/harness files outside verification/ (`harness`)."""
+    return [*check["covers"], *check.get("harness", [])]
+
+
 def pathspecs(check: dict) -> list[str]:
-    return [f":(glob){p}" for p in check["covers"]]
+    return [f":(glob){p}" for p in watched(check)]
 
 
-def covered_files(root: Path, check: dict) -> list[Path]:
+def check_files(root: Path, check: dict) -> list[Path]:
+    """Every file that decides this check's result: covered code, harness files, patches, and
+    the verification/<area>/ folders its commands refer to. Not the manifest itself (the
+    check's own entry is hashed separately) and not other checks' areas."""
     files: set[Path] = set()
-    for pattern in check["covers"]:
+    for pattern in watched(check):
         files.update(p for p in root.glob(pattern) if p.is_file())
+    vdir = (root / "verification").resolve()
+    areas: set[Path] = set()
+    for text in [check["run"], *[mf.get("run", "") for mf in check["must_fail"]],
+                 *[mf.get("patch", "") for mf in check["must_fail"]]]:
+        for token in re.findall(r"[\w./\\:-]+", text):
+            p = root / token
+            if p.is_file():
+                files.add(p)
+                rp = p.resolve()
+                if vdir in rp.parents and rp.parent != vdir:
+                    areas.add(rp.parent)
+    for area in areas:
+        files.update(x for x in area.rglob("*") if x.is_file())
     return sorted(files)
 
 
 def fingerprint(root: Path, check: dict) -> str:
-    """Hash of the covered code + the verification files + the check's meaning."""
+    """Hash of the check's meaning + every file that decides its result."""
     meaning = {k: v for k, v in check.items() if k != "synced_commit"}
     h = hashlib.sha256(json.dumps(meaning, sort_keys=True, default=str).encode())
-    paths = covered_files(root, check)
-    vdir = root / "verification"
-    if vdir.exists():
-        paths += sorted(p for p in vdir.rglob("*") if p.is_file())
-    for p in paths:
+    for p in check_files(root, check):
         h.update(p.relative_to(root).as_posix().encode())
         h.update(p.read_bytes())
     return h.hexdigest()
+
+
+def read_keep(path: Path) -> str:
+    """Read text without translating line endings, so a rewrite keeps the file's style."""
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def write_keep(path: Path, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
 
 
 def state_path(root: Path, name: str) -> Path:
@@ -503,6 +535,8 @@ def cmd_list(args) -> int:
             if c.get(key):
                 print(f"    {key + ':':<8} {c[key]}")
         print(f"    covers:  {', '.join(c['covers'])}")
+        if c["harness"]:
+            print(f"    harness: {', '.join(c['harness'])}")
         print(f"    run:     {c['run']}")
         print(f"    variants:{len(c['must_fail']):>2} must_fail")
         print(f"    sync:    {c.get('synced_commit') or '-'} ({status});  last local pass: "
@@ -511,14 +545,16 @@ def cmd_list(args) -> int:
 
 
 def set_synced_commit(text: str, check_id: str, sha: str) -> str:
+    """Rewrite one check's synced_commit line, keeping every other byte (and line ending) as is."""
+    nl = "\r\n" if "\r\n" in text else "\n"
     blocks = re.split(r"(?m)^(?=\[\[check\]\])", text)
     for i, block in enumerate(blocks):
         if re.search(rf'(?m)^id\s*=\s*"{re.escape(check_id)}"\s*$', block):
             if re.search(r'(?m)^synced_commit\s*=', block):
-                blocks[i] = re.sub(r'(?m)^synced_commit\s*=.*$', f'synced_commit = "{sha}"', block, count=1)
+                blocks[i] = re.sub(r'(?m)^synced_commit\s*=[^\r\n]*', f'synced_commit = "{sha}"', block, count=1)
             else:
-                blocks[i] = re.sub(rf'(?m)^(id\s*=\s*"{re.escape(check_id)}".*)$',
-                                   rf'\1\nsynced_commit = "{sha}"', block, count=1)
+                blocks[i] = re.sub(rf'(?m)^(id\s*=\s*"{re.escape(check_id)}"[^\r\n]*)',
+                                   lambda mm: f'{mm.group(1)}{nl}synced_commit = "{sha}"', block, count=1)
             return "".join(blocks)
     die(f"check {check_id!r} not found in manifest")
 
@@ -539,7 +575,10 @@ def cmd_sync(args) -> int:
         if not r["ok"]:
             die(f"{c['id']} does not pass, so its sync commit stays at {c.get('synced_commit') or '-'}", FAILED)
         path = root / MANIFEST_REL
-        path.write_text(set_synced_commit(path.read_text(encoding="utf-8"), c["id"], sha), encoding="utf-8")
+        write_keep(path, set_synced_commit(read_keep(path), c["id"], sha))
+        state = read_state(root)  # this rerun passed: record it, so `list` and the hook see it
+        state[c["id"]] = {"fingerprint": fingerprint(root, c), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        write_state(root, state)
         print(f"   synced {c['id']} -> {sha}. Commit {MANIFEST_REL.as_posix()} to record it.")
     return OK
 
@@ -1103,7 +1142,8 @@ version = 1
 # tool = "TLA+ / TLC"
 # tags = ["payments"]
 # run = "{verikit} tlc verification/checkout/Checkout.tla"            # ONE command, exit 0 = holds
-# covers = ["src/Payments/**/*.cs", "web/src/app/checkout/**/*.ts"]   # code this check describes
+# covers = ["src/Payments/**/*.cs", "web/src/app/checkout/**/*.ts"]   # product code this check describes
+# harness = ["tests/Payments.Tests/CheckoutVerificationTests.cs"]     # the check's own test files outside verification/
 # bounds = "1 order, up to 3 attempts"
 # assumes = ["The payment provider deduplicates by idempotency key"]
 # synced_commit = ""          # set by `verikit sync <id>`, never by hand
@@ -1129,7 +1169,7 @@ def cmd_init(args) -> int:
     vdir.mkdir(exist_ok=True)
     man = root / MANIFEST_REL
     if not man.exists():
-        man.write_text(MANIFEST_TEMPLATE, encoding="utf-8")
+        write_keep(man, MANIFEST_TEMPLATE)  # LF on every OS; sync keeps whatever style it finds
         print(f"created {man.relative_to(top).as_posix()}")
     target = vdir / "verikit.py"
     if Path(__file__).resolve() != target.resolve():
@@ -1137,8 +1177,10 @@ def cmd_init(args) -> int:
         print(f"wrote {target.relative_to(top).as_posix()} (runner {VERSION}; commit it; re-run init to upgrade)")
     gi = root / ".gitignore"
     if ".verikit/" not in _read(gi):
-        with open(gi, "a", encoding="utf-8") as f:
-            f.write(("\n" if gi.exists() and not _read(gi).endswith("\n") else "") + ".verikit/\n")
+        existing = read_keep(gi) if gi.exists() else ""
+        nl = "\r\n" if "\r\n" in existing else "\n"
+        sep = nl if existing and not existing.endswith("\n") else ""
+        write_keep(gi, existing + sep + ".verikit/" + nl)   # same line endings as the file had
         print("added .verikit/ to .gitignore")
     skills_src = KIT_DIR / "plugin" / "skills"
     if args.skills and skills_src.exists():
@@ -1159,7 +1201,7 @@ def cmd_init(args) -> int:
         if not any("verikit.py" in h.get("command", "") for entry in stop for h in entry.get("hooks", [])):
             stop.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 60}]})
             settings.parent.mkdir(exist_ok=True)
-            settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            write_keep(settings, json.dumps(data, indent=2) + "\n")
             print("added Stop hook to .claude/settings.json")
     if args.ci:
         src = KIT_DIR / "templates" / "ci" / ("github-actions.yml" if args.ci == "github" else "azure-pipelines.yml")

@@ -73,7 +73,9 @@ python verification/verikit.py list                    # what exists, what is st
 ## 6. Hard rules
 
 1. Never weaken a rule, a model, a bound or a `match` to make a check pass.
-2. Never edit product code while creating or maintaining checks, unless the user asks.
+2. Never edit product logic while creating or maintaining checks, unless the user asks.
+   Test files, test scripts, test project references and CI install steps needed to run the
+   checks are part of the job; say in the hand-off which ones you changed.
 3. Every check has at least one `must_fail`; every model has a reachability witness; every
    guard has its own broken variant; every `must_fail` has a `match` that names the rule.
 4. Never set `synced_commit` by hand. Only `verikit sync` writes it, and only after a pass.
@@ -91,7 +93,13 @@ python verification/verikit.py list                    # what exists, what is st
 - [ ] Model actions / test steps each map to code a reviewer can open (comments name file + function).
 - [ ] `python verification/verikit.py run <id>` shows `[ok] holds` and `[ok] must fail` for **every** variant.
 - [ ] At least one variant per guard, plus a witness for every model.
-- [ ] Code checks live in the existing test projects and run in the team's normal test command too.
+- [ ] Code checks live in the existing test projects and run in the team's normal test command too
+      (check the test script: a file list needs the new file, or use a glob).
+- [ ] The check's own test files are listed in `harness`; the product files it describes in `covers`.
+- [ ] If the service can run as several instances, the model has more than one, or `assumes`
+      says "single instance" and the user confirmed it.
+- [ ] The CI workflow installs what the check needs (`npm ci` in the right folder, .NET SDK,
+      Windows runner for `net4x`).
 - [ ] `bounds` and `assumes` filled in honestly.
 - [ ] Committed, then `verikit sync <id>`, manifest committed.
 - [ ] Hand-off states: tool and why, bounds, result, variants caught, rerun command, what it leaves out.

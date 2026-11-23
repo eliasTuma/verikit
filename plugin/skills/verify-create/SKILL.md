@@ -45,6 +45,16 @@ Stack-specific instructions - test projects, libraries, run commands, pitfalls:
 [.NET and .NET Framework](stacks/dotnet.md) · [Node backend](stacks/node.md) ·
 [React](stacks/react.md) · [Angular](stacks/angular.md) · [other stacks](routing.md).
 
+**Design check, code check, or both?**
+- **Both** when the promise depends on more than one process or machine: retries across a
+  network, several instances of a service, queues, webhooks, browser + API. A code check runs
+  in one process and cannot see a second instance; the model can (make the instance count a
+  constant). This is also the default when unsure.
+- **Code check only** when everything that can interleave happens inside one process and the
+  test can drive every ordering (a UI component, an in-process state machine).
+- **Design check only** when the code does not exist yet or cannot be driven from a test;
+  say in the hand-off that nothing checks the code itself.
+
 For a promise that spans frontend and backend, write ONE design model of the whole flow
 (browser, network, services, providers as separate actors) plus one code check per side
 that owns part of the promise. The model can drift from the code; the code checks cannot,
@@ -55,10 +65,16 @@ but they only sample. Together they cover each other's blind spot.
 **Models (TLA+), in `verification/<area>/`:**
 - Every action is one indivisible step in the code. Put the file and function it stands
   for in a comment above it. Use this repo's names.
-- Write `Next` as a disjunction of NAMED actions (`GatewayHandlesARequest == \E n \in ...`)
-  so counterexamples say which step happened.
+- Write `Next` as a disjunction of named actions. A trace step is labelled with the action
+  TLC evaluated (for `\E n \in S : Handle(n)` that can be `Handle`, without `n`); `verikit tlc`
+  prints which variables changed in each step, and that shows which request moved. If the
+  reader needs the request named, keep its id in a variable (e.g. `lastStep`).
 - Model the environment honestly: the network delays, reorders and duplicates; timers fire
   before or after replies; a second user, tab or worker can act at any time.
+- **In-memory guards protect one process.** A lock, `Set`, flag or cache held in memory does
+  nothing for a second instance of the service. Model the number of instances as a constant;
+  if the rule breaks with 2, report it as a finding, or record "runs as a single instance" in
+  `assumes` only after the user confirms it.
 - Keep bounds small (2-3 actors, 2-3 retries) and write them in `bounds`. Write every
   assumption in `assumes`. Add `TypeOK`.
 - One `.cfg` per spec. Express variants with `--const NAME=VALUE` and witnesses with
@@ -70,8 +86,14 @@ but they only sample. Together they cover each other's blind spot.
 - Put them next to the team's tests, in the same project and runner, and mark them so
   they can run alone: `[Trait("Category", "Verification")]` (xUnit),
   `[Category("Verification")]` (NUnit), `[TestCategory("Verification")]` (MSTest), or a
-  `verification` name / tag in Jest, Vitest and Jasmine. The manifest's `run` selects them;
-  the team's normal test run still includes them.
+  `verification` name / tag in Jest, Vitest and Jasmine. The manifest's `run` selects them.
+  Make sure the team's normal test command includes them too: if the test script lists
+  files explicitly (`node --test a.test.js`), add the new file or switch to a glob.
+- Editing test and CI configuration so the checks run (test scripts, test project
+  references, the CI workflow's install steps) is part of this work. Editing product logic
+  is not, unless the user asks.
+- List the check's own test files in the manifest's `harness`, so editing the check itself
+  (a weakened assertion, fewer runs) makes it stale and re-runs it, like a product change.
 - Run the real code. Fake only the boundaries you do not own (network, clock, provider),
   and let the tool control their timing and order.
 - Read the seed from the `VERIKIT_SEED` environment variable when the library supports a
@@ -84,7 +106,10 @@ A check that you have never seen fail proves nothing. Add `[[check.must_fail]]` 
 
 - **One broken variant per guard**, each on its own: a `patch` that removes or reorders
   one guard in the product code (write it with `git diff --relative` from the folder that
-  holds `verification/`), or a `--const` that disables it in the model.
+  holds `verification/`), or a `--const` that disables it in the model. A guard is any
+  check or ordering whose removal could break THIS rule. Code that only affects whether
+  things eventually finish (a `finally` that releases a lock) is not a guard for a safety
+  rule like "at most once"; list it under the gaps instead.
 - **One reachability witness per model:** `--inv NeverCharged` where `NeverCharged`
   says the good thing never happens. It must FAIL; otherwise the rule may pass vacuously.
 - **Every `must_fail` has a `match`** regex naming the broken rule. Write regexes as TOML
@@ -94,8 +119,11 @@ A check that you have never seen fail proves nothing. Add `[[check.must_fail]]` 
 
 Add the `[[check]]` with `id`, `rule`, `harm`, `level` (`design` or `code`), `tool`,
 `tags`, ONE `run` command, `covers` (globs, relative to the folder holding `verification/`,
-of every file the check describes - both frontend and backend paths if it spans them),
-`bounds`, `assumes` and the `must_fail` entries. Then:
+of every product file the check describes - both frontend and backend paths if it spans
+them), `harness` (the check's own test files outside `verification/`), `bounds`, `assumes`
+and the `must_fail` entries. If `init --ci` created a workflow, make it install what this
+check needs (uncomment `npm ci` with the right `working-directory`, keep `setup-dotnet`, use a
+Windows runner for `net4x` tests). Then:
 
 ```sh
 python verification/verikit.py run <id>

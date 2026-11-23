@@ -10,6 +10,7 @@ tool = "fast-check scheduler + Testing Library on the real PayButton (Vitest, js
 tags = ["payments", "frontend"]
 run = "npx vitest run -t verification"
 covers = ["src/PayButton.jsx"]
+harness = ["test/PayButton.verification.test.jsx"]
 bounds = "200 runs; 1-4 bursts of 1-2 same-tick clicks interleaved with server replies; sampling"
 assumes = ["api.pay is the only way the component starts a payment."]
 synced_commit = ""

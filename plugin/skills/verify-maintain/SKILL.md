@@ -21,7 +21,10 @@ a rule to make it pass.
    is its own root: run the commands from inside it (or pass `--root`).
 2. **Run it as it is**, before changing anything: `python verification/verikit.py run <id>`.
    Record the result. A pass only says the old description still holds.
-3. **Read every change to covered code:** `git log -p <synced_commit>..HEAD -- <covers>`.
+3. **Read every change to covered code and to the check's harness:**
+   `git log -p <synced_commit>..HEAD -- <covers> <harness>`. A harness change that weakens the
+   check (looser assertion, fewer runs, a removed scenario) needs the user's approval, like a
+   rule change.
    Look for moved or renamed code too, and new code that writes the state the rule guards
    (it may need adding to `covers`). Classify each change:
    - **no effect** on what the model describes (check against the model, not the commit message);

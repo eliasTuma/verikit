@@ -10,6 +10,7 @@ tool = "FsCheck + xUnit: generated event orderings on the real CheckoutSession (
 tags = ["payments"]
 run = "dotnet test tests/Checkout.Tests --filter Category=Verification"
 covers = ["src/Checkout/**/*.cs"]
+harness = ["tests/Checkout.Tests/CheckoutVerificationTests.cs"]
 bounds = "500 generated schedules per target framework, maxRetries 0..3; sampling, not exhaustive"
 assumes = ["The provider charges at most once per idempotency key (the fake models this)."]
 timeout = 900

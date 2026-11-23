@@ -44,4 +44,10 @@ add a seam first and say so in the hand-off.
 
 - Use `s.waitIdle()` (fast-check 4.2+); `waitAll` is deprecated.
 - Real timers and real network calls escape the scheduler and make runs non-reproducible.
-- Node 22's `node --test` does not accept a directory argument; list the files.
+- Node 22's `node --test` does not accept a bare directory, but it does accept a glob:
+  `node --test "test/*.test.js"` (checked on Node 22.13). If the project's `npm test` lists
+  files one by one, add the verification file or switch to a glob, so the team's normal
+  test run includes the check.
+- One in-memory guard (a `Set` of in-flight keys, a mutex) protects one Node process only.
+  If the service runs with several instances or workers, the TLA+ model must have more than
+  one instance; a single-process fast-check test cannot see that race.

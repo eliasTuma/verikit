@@ -15,10 +15,16 @@ broken variants that must make them fail, and drift tracking.
 | Vitest | `test('verification: ...')` | `npx vitest run -t verification` |
 | Jest | `test('verification: ...')` | `npx jest -t verification` |
 | Karma/Jasmine (Angular) | `*.verification.spec.ts` | `npx ng test --watch=false --include="**/*.verification.spec.ts"` |
-| node:test | a separate file | `node --test test/<file>.test.js` |
+| node:test | a separate `*.test.js` file | `node --test test/<file>.test.js` |
 
-The team's normal `dotnet test` / `npm test` still runs them. The manifest's `run` selects only
-them, so verikit can run each check, and each broken variant, quickly.
+The manifest's `run` selects only the verification tests, so verikit can run each check, and
+each broken variant, quickly. Make sure the team's normal command runs them too: filters by
+category include them by default, but a test script that lists files one by one
+(`node --test a.test.js`) must be given the new file or a glob (`node --test "test/*.test.js"`).
+
+List each check's own test files under `harness` in the manifest. Then a change to the check
+itself (a weakened assertion, fewer runs) makes it stale and `run --changed` picks it up, just
+like a change to the product code under `covers`.
 
 ## Seeds
 

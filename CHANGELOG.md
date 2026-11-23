@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.1 - 2026-11-23
+
+Fixes from the first fresh-agent acceptance test (an agent given only AGENTS.md added a
+verified promise to a new repo, and found two real bugs in that repo's code with it).
+
+- New `harness` field: the check's own test files. Editing them makes the check stale, selects
+  it in `run --changed` and wakes the Stop hook, so a weakened assertion cannot slip through.
+- Fingerprints cover only what decides a check (covered code, harness, patches, its
+  `verification/<area>/` folder), not the whole `verification/` folder or the manifest:
+  editing one check no longer marks every check as changed.
+- `sync` records its passing rerun; `list` no longer says "code changed since" right after a sync.
+- Line endings: `init` writes LF on every OS and appends to `.gitignore` in the file's own
+  style; `sync` rewrites one line and keeps the manifest's line endings.
+- `doctor` routes plain Node/TypeScript packages to fast-check and points at the installed
+  skill paths.
+- Docs: design vs code check vs both; in-memory guards protect one process (model instances);
+  what counts as a guard; test/CI configuration edits are part of the job; `npm test` must run
+  the verification file (Node 22 accepts globs); CI install steps; accurate wording on how TLC
+  labels trace steps.
+
 ## 0.2.0 - 2026-11-23 (initial public version)
 
 - Monorepo support: the nearest folder holding `verification/verification.toml` is the root;

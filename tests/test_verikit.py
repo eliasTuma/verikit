@@ -253,6 +253,41 @@ class StaleChangedHook(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("changed: svc/src/notes.txt", out)
 
+    def test_list_is_fresh_right_after_sync(self):
+        code, out = vk("list", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.assertIn("(synced)", out)
+        self.assertNotIn("code changed since", out)
+        self.assertNotIn("last local pass: never", out)
+
+    def test_harness_edit_makes_check_stale_and_selected(self):
+        manifest = self.r.root / "verification" / "verification.toml"
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+            'covers = ["src/**/*.txt"]', 'covers = ["src/**/*.txt"]\nharness = ["check.py"]'), encoding="utf-8")
+        self.r.commit("declare harness")
+        vk("sync", "guard", "--root", str(self.r.root))
+        self.r.commit("sync")
+        self.assertIn("nothing to run", vk("run", "--root", str(self.r.root), "--changed")[1])
+        # someone weakens the verification test itself
+        (self.r.root / "check.py").write_text(CHECK_PY + "\n# weakened\n", encoding="utf-8")
+        self.r.commit("edit harness")
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1)
+        self.assertIn("changed: svc/check.py", out)
+        self.assertIn("== guard", vk("run", "--root", str(self.r.root), "--changed")[1])
+
+    def test_sync_keeps_crlf_line_endings(self):
+        manifest = self.r.root / "verification" / "verification.toml"
+        raw = manifest.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        manifest.write_bytes(raw)
+        self.r.commit("crlf manifest")
+        code, out = vk("sync", "guard", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        after = manifest.read_bytes()
+        self.assertEqual(after.count(b"\r\n"), raw.count(b"\r\n"))
+        self.assertNotIn(b"\r\r", after)
+        self.assertEqual(after.replace(b"\r\n", b"").count(b"\n"), 0)
+
     def test_changed_against_base_ref(self):
         base = git(self.r.top, "rev-parse", "HEAD").strip()
         code, out = vk("run", "--root", str(self.r.root), "--changed", base)
@@ -329,6 +364,8 @@ class Init(unittest.TestCase):
             settings = json.loads((r.top / ".claude" / "settings.json").read_text(encoding="utf-8"))
             self.assertIn("svc/verification/verikit.py", settings["hooks"]["Stop"][0]["hooks"][0]["command"])
             self.assertIn(".verikit/", (r.root / ".gitignore").read_text(encoding="utf-8"))
+            self.assertNotIn(b"\r\n", (r.root / "verification" / "verification.toml").read_bytes())
+            self.assertNotIn(b"\r\n", (r.top / ".claude" / "settings.json").read_bytes())
             self.assertTrue((r.top / ".github" / "workflows" / "verify.yml").exists())
             code, out = vk("init", "--root", str(r.root), "--hook")             # idempotent
             self.assertEqual(code, 0)

@@ -13,7 +13,7 @@ model of the design) and/or **hundreds of generated orderings of the real code**
 tests inside your own test projects), with proof that every check can actually fail.
 
 It is a small Python runner (stdlib only), three agent skills, templates for .NET, Node,
-React and Angular, and CI templates. Version **0.2.0** - an initial public version; see
+React and Angular, and CI templates. Version **0.2.1** - an initial public version; see
 [what has been tested](#supported-stacks).
 
 ---
@@ -171,7 +171,8 @@ rule = "A customer is never charged twice for one purchase."
 level = "code"
 tool = "FsCheck in Payments.Tests"
 run = "dotnet test tests/Payments.Tests --filter Category=Verification"
-covers = ["src/Payments/**/*.cs"]
+covers = ["src/Payments/**/*.cs"]                                   # the product code it describes
+harness = ["tests/Payments.Tests/CheckoutVerificationTests.cs"]     # the check's own test files
   [[check.must_fail]]
   why = "Broken variant: key built per attempt"
   patch = "verification/payments/mutants/key-per-attempt.patch"   # relative to the folder holding verification/

@@ -36,6 +36,7 @@ tool = "fast-check scheduler on the real payForOrder()"
 tags = ["payments"]
 run = "node --test test/checkout.race.test.js"
 covers = ["src/checkout.js"]
+harness = ["test/checkout.race.test.js"]
 bounds = "400 random schedules per run, maxRetries 0..3; sampling, not exhaustive"
 assumes = ["The fake provider deduplicates by idempotency key, as real providers document."]
 synced_commit = ""

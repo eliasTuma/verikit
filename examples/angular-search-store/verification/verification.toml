@@ -10,6 +10,7 @@ tool = "fast-check scheduler on the real RxJS pipeline (Vitest); Angular wiring 
 tags = ["frontend"]
 run = "npx vitest run -t verification"
 covers = ["src/search.store.js"]
+harness = ["test/search.store.verification.test.js"]
 bounds = "300 runs; 1-4 queries typed in order, responses arriving in any order; sampling"
 assumes = ["The Angular service only forwards HttpClient calls to this store."]
 synced_commit = ""
