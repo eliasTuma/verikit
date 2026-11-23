@@ -36,7 +36,7 @@ def rmtree(path) -> None:
     shutil.rmtree(path, onerror=onerror) if sys.version_info < (3, 12) else shutil.rmtree(path, onexc=onerror)
 
 
-CI_VARS = ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "TF_BUILD", "BUILD_REASON",
+CI_VARS = ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "GITHUB_STEP_SUMMARY", "TF_BUILD", "BUILD_REASON",
            "SYSTEM_PULLREQUEST_TARGETBRANCH", "SYSTEM_PULLREQUEST_TARGETBRANCHNAME",
            "CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
 CLEAN_ENV = {k: v for k, v in os.environ.items() if k not in CI_VARS}  # this script may run inside CI

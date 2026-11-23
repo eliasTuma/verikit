@@ -1232,7 +1232,7 @@ def publish_summary(root: Path, text: str, path: str | None, ci: bool) -> None:
         Path(path).write_text(text, encoding="utf-8")
     if not ci:
         return
-    if os.environ.get("GITHUB_STEP_SUMMARY"):
+    if os.environ.get("GITHUB_ACTIONS") and os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
             f.write(text + "\n")
     elif os.environ.get("TF_BUILD"):
