@@ -182,6 +182,10 @@ harness = ["tests/Payments.Tests/CheckoutVerificationTests.cs"]     # the check'
 `{verikit}` expands to the runner, `{python}` to the interpreter. `run` is any shell command,
 executed in the folder that holds `verification/`.
 
+Frontend and backend in **separate repositories**: add `[sources.web] path = "../web-app"` and
+cover `web:src/app/checkout/**/*.ts`; `sync` records that repo's commit too, and `stale`, `--ci`
+and the hook report drift there. Details: [combining-with-tests](docs/combining-with-tests.md#frontend-and-backend-in-separate-repositories).
+
 ## Repository layout
 
 ```
@@ -201,8 +205,8 @@ AGENTS.md                  the agent guide
   [templates/CODEOWNERS.snippet](templates/CODEOWNERS.snippet)).
 - A model checks the design, not the code; code checks and `stale` narrow that gap, they do
   not close it. Property tests sample: a pass is evidence, not proof.
-- Drift across separate repositories (frontend and backend in different repos) is not tracked;
-  `stale` sees only its own repo. Checks run one after another (no parallelism yet).
+- Across separate repositories verikit tracks drift only; broken-variant patches run in the
+  repository that owns the check. Checks run one after another (no parallelism yet).
 - See [docs/roadmap.md](docs/roadmap.md) for what is next.
 
 ## Credits and license

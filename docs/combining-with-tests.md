@@ -58,6 +58,37 @@ The CI templates use `--ci`, run each verification root of a monorepo, and publi
 Run `init --ci ...` again inside each other root of a monorepo: it adds that root to the
 `# verikit:roots` list in the existing workflow.
 
+## Frontend and backend in separate repositories
+
+A check lives in one repository, but its `covers` (and `harness`) can name files in another one
+through a named source:
+
+```toml
+[sources.web]
+path = "../storefront-web"          # where that repo is checked out, relative to this root
+
+[[check]]
+id = "pay-once"
+covers = ["src/Payments/**/*.cs", "web:src/app/checkout/**/*.ts"]   # name:glob = in that repo
+harness = ["web:src/app/checkout/pay.verification.spec.ts"]
+synced_commit = "..."               # this repo, written by `verikit sync`
+synced_sources = { web = "..." }    # the other repo's commit at the same sync, also written by sync
+```
+
+- `stale`, `run --changed`, `run --ci` and the Stop hook see a change in the other repository
+  as drift, measured from the commit `sync` recorded for it.
+- `sync` refuses while covered files in the other repository have uncommitted edits.
+- A missing checkout makes the check `unknown`, which fails `stale --strict` (never `synced`).
+  The Stop hook does not block a developer who simply has not cloned the other repo.
+- Override the path with `VERIKIT_SOURCE_WEB=<path>` (CI often checks it out elsewhere). Run
+  commands get `VERIKIT_SOURCE_WEB` exported, and may use `{source:web}` for the path.
+- Drift tracking only: broken-variant patches are applied in this repository, never in the other.
+  Put the other side's code check (and its variants) in that repository's own manifest.
+- CI: check the other repository out with full history, then set `VERIKIT_SOURCE_<NAME>`.
+  GitHub: a second `actions/checkout` with `repository:` and `path:`. Azure: a `resources:
+  repositories:` entry and a second `checkout:` step; with more than one checkout step Azure puts
+  `self` under `$(Build.SourcesDirectory)/<repo name>`, so adjust the template's `workingDirectory`.
+
 ## Mutation testing
 
 Stryker.NET and StrykerJS mutate code broadly and report which mutants no test kills. verikit's

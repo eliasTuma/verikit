@@ -124,6 +124,12 @@ def load_manifest(root: Path) -> dict:
     except tomllib.TOMLDecodeError as e:
         die(f"{MANIFEST_REL.as_posix()}: {e}")
     checks = data.get("check", [])
+    sources = data.get("sources", {})
+    for name, spec in sources.items():
+        if not re.fullmatch(r"[A-Za-z][\w-]+", name) or not isinstance(spec, dict) \
+                or not isinstance(spec.get("path"), str):
+            die(f"[sources.{name}] needs a name of 2+ letters/digits/-/_ and `path = \"../other-repo\"` "
+                "(where that repository is checked out, relative to the folder holding verification/)")
     seen = set()
     for i, c in enumerate(checks):
         for key in ("id", "rule", "run", "covers"):
@@ -136,10 +142,19 @@ def load_manifest(root: Path) -> dict:
             die(f"check {c['id']!r}: `covers` must be a non-empty list of globs")
         c.setdefault("must_fail", [])
         c.setdefault("synced_commit", "")
+        c.setdefault("synced_sources", {})
         c.setdefault("tags", [])
         c.setdefault("harness", [])
         if not isinstance(c["harness"], list):
             die(f"check {c['id']!r}: `harness` must be a list of globs (the check's own test/model files)")
+        if not isinstance(c["synced_sources"], dict):
+            die(f"check {c['id']!r}: `synced_sources` is written by `verikit sync`; restore it or delete the line")
+        c["_sources"] = sources
+        for pattern in (*c["covers"], *c["harness"]):
+            m = SOURCE_PREFIX.match(pattern)
+            if m and m.group(1) not in sources:
+                die(f"check {c['id']!r}: {pattern!r} names a repository {m.group(1)!r}, but the manifest has no "
+                    f"[sources.{m.group(1)}] table. Add one with `path = \"../{m.group(1)}\"`.")
         if not c["must_fail"]:
             warn(f"check {c['id']!r} has no [[check.must_fail]] - a check you have never seen fail proves nothing.")
         for j, mf in enumerate(c["must_fail"]):
@@ -170,10 +185,61 @@ def select(checks: list[dict], ids: list[str], tags: list[str] | None = None) ->
     return chosen
 
 
+SOURCE_PREFIX = re.compile(r"^([A-Za-z][\w-]+):(?![\\/])(.+)$")  # web:src/**  (not C:\ or C:/)
+MISSING = "(missing source "
+
+
+def _source_of(pattern: str, check: dict) -> tuple[str | None, str]:
+    m = SOURCE_PREFIX.match(pattern)
+    if m and m.group(1) in check.get("_sources", {}):
+        return m.group(1), m.group(2)
+    return None, pattern
+
+
 def watched(check: dict) -> list[str]:
-    """Globs whose changes make a check stale: the product code it describes (`covers`) and
-    the check's own test/harness files outside verification/ (`harness`)."""
-    return [*check["covers"], *check.get("harness", [])]
+    """Globs in THIS repository whose changes make a check stale: the product code it describes
+    (`covers`) and the check's own test/harness files outside verification/ (`harness`)."""
+    return [p for p in (*check["covers"], *check.get("harness", [])) if _source_of(p, check)[0] is None]
+
+
+def source_globs(check: dict) -> dict[str, list[str]]:
+    """Globs in OTHER repositories (`name:glob` in covers/harness), by source name."""
+    out: dict[str, list[str]] = {}
+    for p in (*check["covers"], *check.get("harness", [])):
+        name, glob = _source_of(p, check)
+        if name:
+            out.setdefault(name, []).append(glob)
+    return out
+
+
+def source_env(name: str) -> str:
+    return "VERIKIT_SOURCE_" + re.sub(r"\W", "_", name).upper()
+
+
+def source_dir(root: Path, check: dict, name: str) -> Path | None:
+    """Where source `name` is checked out (env VERIKIT_SOURCE_<NAME>, else its manifest path),
+    or None when there is no git checkout there."""
+    raw = os.environ.get(source_env(name)) or check["_sources"][name]["path"]
+    path = (root / raw).resolve()
+    return path if path.is_dir() and git_toplevel(path) else None
+
+
+def _source_changes(src: Path, globs: list[str], since: str | None) -> tuple[int, list[str]]:
+    """Files under `src` matching `globs` that changed since commit `since` (None: only
+    uncommitted edits and untracked files), relative to `src`."""
+    specs = [f":(glob){g}" for g in globs]
+    found: set[str] = set()
+    code, out = 0, ""
+    if since:
+        code, out = git(src, "diff", "--name-only", "--relative", f"{since}..HEAD", "--", *specs)
+        if code != 0:
+            return code, [out]
+        found.update(out.splitlines())
+    _, dirty = git(src, "diff", "--name-only", "--relative", "HEAD", "--", *specs)
+    _, untracked = git(src, "ls-files", "--others", "--exclude-standard", "--", *specs)
+    found.update(dirty.splitlines())
+    found.update(untracked.splitlines())
+    return 0, sorted(f for f in found if f.strip())
 
 
 def pathspecs(check: dict) -> list[str]:
@@ -204,12 +270,22 @@ def check_files(root: Path, check: dict) -> list[Path]:
 
 
 def fingerprint(root: Path, check: dict) -> str:
-    """Hash of the check's meaning + every file that decides its result."""
-    meaning = {k: v for k, v in check.items() if k != "synced_commit"}
+    """Hash of the check's meaning + every file that decides its result, including the files
+    it covers in other repositories."""
+    meaning = {k: v for k, v in check.items()
+               if k not in ("synced_commit", "synced_sources") and not k.startswith("_")}
     h = hashlib.sha256(json.dumps(meaning, sort_keys=True, default=str).encode())
     for p in check_files(root, check):
         h.update(p.relative_to(root).as_posix().encode())
         h.update(p.read_bytes())
+    for name, globs in sorted(source_globs(check).items()):
+        src = source_dir(root, check, name)
+        if src is None:
+            h.update(f"{name}:<no checkout>".encode())
+            continue
+        for p in sorted({f for g in globs for f in src.glob(g) if f.is_file()}):
+            h.update(f"{name}:{p.relative_to(src).as_posix()}".encode())
+            h.update(p.read_bytes())
     return h.hexdigest()
 
 
@@ -248,8 +324,25 @@ def expand(cmd: str) -> str:
                .replace("{verikit}", f"{q(sys.executable)} {q(str(Path(__file__).resolve()))}"))
 
 
-def run_shell(cmd: str, cwd: Path, timeout: int, seed: int | None = None) -> tuple[int, str, float]:
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", FORCE_COLOR="0", NO_COLOR="1")
+def with_sources(root: Path, check: dict, cmd: str) -> tuple[str, dict[str, str]]:
+    """Expand {source:NAME} to that repository's checkout path and export VERIKIT_SOURCE_<NAME>
+    for every source that is checked out. A command that needs a missing checkout fails."""
+    env: dict[str, str] = {}
+    for name in check.get("_sources", {}):
+        d = source_dir(root, check, name)
+        if d:
+            env[source_env(name)] = str(d)
+        if "{source:" + name + "}" in cmd:
+            if not d:
+                raise VerikitError(f"this command needs a checkout of source {name!r} at "
+                                   f"{check['_sources'][name]['path']} (or set {source_env(name)})", FAILED)
+            cmd = cmd.replace("{source:" + name + "}", f'"{d}"' if " " in str(d) else str(d))
+    return cmd, env
+
+
+def run_shell(cmd: str, cwd: Path, timeout: int, seed: int | None = None,
+              extra_env: dict[str, str] | None = None) -> tuple[int, str, float]:
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", FORCE_COLOR="0", NO_COLOR="1", **(extra_env or {}))
     if seed is not None:
         env["VERIKIT_SEED"] = str(seed)
     t0 = time.time()
@@ -409,7 +502,14 @@ def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | 
     print(f"\n== {check['id']}  [{check.get('level', '?')} | {check.get('tool', '?')}]")
     print(f"   rule: {check['rule']}")
 
-    code, out, secs = run_shell(check["run"], root, timeout, seed)
+    try:
+        main_cmd, src_env = with_sources(root, check, check["run"])
+    except VerikitError as e:
+        print(f"   [FAIL] holds on the current code: {e}")
+        result["steps"].append({"what": "holds on the current code", "ok": False, "exit": None, "output": str(e)})
+        result["ok"] = False
+        return result
+    code, out, secs = run_shell(main_cmd, root, timeout, seed, src_env)
     passed = code == 0
     print(f"   {'[ok]  ' if passed else '[FAIL]'} holds on the current code ({secs:.1f}s, exit {code})")
     if not passed or verbose:
@@ -420,13 +520,13 @@ def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | 
 
     for mf in check["must_fail"]:
         why = mf.get("why", "broken variant")
-        cmd = mf.get("run", check["run"])
         try:
+            cmd, _ = with_sources(root, check, mf.get("run", check["run"]))
             if mf.get("patch"):
                 with AppliedPatch(root, mf["patch"]):
-                    code, out, secs = run_shell(cmd, root, timeout, seed)
+                    code, out, secs = run_shell(cmd, root, timeout, seed, src_env)
             else:
-                code, out, secs = run_shell(cmd, root, timeout, seed)
+                code, out, secs = run_shell(cmd, root, timeout, seed, src_env)
         except VerikitError as e:
             if e.code == ERROR:
                 raise
@@ -466,11 +566,13 @@ def changed_checks(root: Path, checks: list[dict], base: str) -> list[dict]:
         if base:
             _, out = git(root, "diff", "--name-only", f"{base}...HEAD", "--", *pathspecs(c))
             _, dirty = git(root, "status", "--porcelain", "--", *pathspecs(c))
-            if out.strip() or dirty.strip():
+            # other repositories have no PR base here: compare them with their sync commit
+            other = [f for s in source_globs(c) for f in _source_stale(root, c, s)[1] if not f.startswith(MISSING)]
+            if out.strip() or dirty.strip() or other:
                 picked.append(c)
         else:
             status, files = stale_info(root, c)
-            if status != "synced":
+            if status != "synced" and not (files and all(f.startswith(MISSING) for f in files)):
                 picked.append(c)
     return picked
 
@@ -573,8 +675,10 @@ def cmd_run(args) -> int:
 
 # --------------------------------------------------------------------------- stale / sync / list
 
-def stale_info(root: Path, check: dict) -> tuple[str, list[str]]:
-    """(status, changed files). status: synced | stale | never-synced | unknown."""
+RANK = {"synced": 0, "stale": 1, "never-synced": 2, "unknown": 3}
+
+
+def _local_stale(root: Path, check: dict) -> tuple[str, list[str]]:
     specs = pathspecs(check)
     _, dirty = git(root, "status", "--porcelain", "--", *specs)
     dirty_files = [line[3:] for line in dirty.splitlines() if line.strip()]
@@ -586,6 +690,33 @@ def stale_info(root: Path, check: dict) -> tuple[str, list[str]]:
         return "unknown", [f"(git: {out})"]
     changed = sorted(set(out.splitlines()) | set(dirty_files))
     return ("stale" if changed else "synced"), changed
+
+
+def _source_stale(root: Path, check: dict, name: str) -> tuple[str, list[str]]:
+    """Drift in another repository, against the commit of it recorded at the last sync."""
+    src = source_dir(root, check, name)
+    if src is None:
+        return "unknown", [f"{MISSING}{name}: no git checkout at {check['_sources'][name]['path']}; "
+                           f"clone it there or set {source_env(name)})"]
+    sha = check.get("synced_sources", {}).get(name, "")
+    code, files = _source_changes(src, source_globs(check)[name], sha or None)
+    if code != 0:
+        return "unknown", [f"{name}: (git: {files[0]})"]
+    files = [f"{name}:{f}" for f in files]
+    if not sha:
+        return "never-synced", files
+    return ("stale" if files else "synced"), files
+
+
+def stale_info(root: Path, check: dict) -> tuple[str, list[str]]:
+    """(status, changed files). status: synced | stale | never-synced | unknown (worst wins).
+    Files in other repositories are shown as `name:path`."""
+    status, changed = _local_stale(root, check)
+    for name in source_globs(check):
+        s, files = _source_stale(root, check, name)
+        status = s if RANK[s] > RANK[status] else status
+        changed = [*changed, *files]
+    return status, changed
 
 
 def self_cmd(root: Path) -> str:
@@ -631,6 +762,10 @@ def cmd_list(args) -> int:
         print(f"    covers:  {', '.join(c['covers'])}")
         if c["harness"]:
             print(f"    harness: {', '.join(c['harness'])}")
+        for name in source_globs(c):
+            src = source_dir(root, c, name)
+            print(f"    source:  {name} = {src or c['_sources'][name]['path'] + ' (NOT checked out)'}; "
+                  f"sync {c['synced_sources'].get(name) or '-'}")
         print(f"    run:     {c['run']}")
         print(f"    variants:{len(c['must_fail']):>2} must_fail")
         print(f"    sync:    {c.get('synced_commit') or '-'} ({status});  last local pass: "
@@ -638,19 +773,27 @@ def cmd_list(args) -> int:
     return OK
 
 
-def set_synced_commit(text: str, check_id: str, sha: str) -> str:
-    """Rewrite one check's synced_commit line, keeping every other byte (and line ending) as is."""
+def set_check_value(text: str, check_id: str, key: str, value: str, after: str = "id") -> str:
+    """Rewrite one `key = value` line of one check (TOML value given as text), keeping every
+    other byte and line ending as is. A missing line is inserted after the `after` line."""
     nl = "\r\n" if "\r\n" in text else "\n"
-    blocks = re.split(r"(?m)^(?=\[\[check\]\])", text)
+    blocks = re.split(r"(?m)^(?=\[\[check\]\]|\[sources\.)", text)
     for i, block in enumerate(blocks):
-        if re.search(rf'(?m)^id\s*=\s*"{re.escape(check_id)}"\s*$', block):
-            if re.search(r'(?m)^synced_commit\s*=', block):
-                blocks[i] = re.sub(r'(?m)^synced_commit\s*=[^\r\n]*', f'synced_commit = "{sha}"', block, count=1)
+        if block.startswith("[[check]]") and re.search(rf'(?m)^id\s*=\s*"{re.escape(check_id)}"\s*$', block):
+            line = f"{key} = {value}"
+            if re.search(rf"(?m)^{key}\s*=", block):
+                blocks[i] = re.sub(rf"(?m)^{key}\s*=[^\r\n]*", lambda _: line, block, count=1)
             else:
-                blocks[i] = re.sub(rf'(?m)^(id\s*=\s*"{re.escape(check_id)}"[^\r\n]*)',
-                                   lambda mm: f'{mm.group(1)}{nl}synced_commit = "{sha}"', block, count=1)
+                anchor = rf'(?m)^({after}\s*=[^\r\n]*)'
+                if not re.search(anchor, block):
+                    anchor = rf'(?m)^(id\s*=\s*"{re.escape(check_id)}"[^\r\n]*)'
+                blocks[i] = re.sub(anchor, lambda mm: f"{mm.group(1)}{nl}{line}", block, count=1)
             return "".join(blocks)
     die(f"check {check_id!r} not found in manifest")
+
+
+def set_synced_commit(text: str, check_id: str, sha: str) -> str:
+    return set_check_value(text, check_id, "synced_commit", f'"{sha}"')
 
 
 def cmd_sync(args) -> int:
@@ -665,11 +808,26 @@ def cmd_sync(args) -> int:
         if dirty.strip():
             die(f"{c['id']}: covered files have uncommitted changes; commit first so the sync "
                 f"commit describes exactly what was checked:\n{dirty}")
+        other_shas = {}
+        for name, globs in source_globs(c).items():  # other repositories: clean, then record HEAD
+            src = source_dir(root, c, name)
+            if src is None:
+                die(f"{c['id']}: it covers files in {name!r}, but there is no git checkout at "
+                    f"{c['_sources'][name]['path']}. Clone it there or set {source_env(name)}.")
+            _, edits = _source_changes(src, globs, None)
+            if edits:
+                die(f"{c['id']}: covered files in {name} ({src}) have uncommitted changes; commit them "
+                    f"there first: {', '.join(edits)}")
+            other_shas[name] = git(src, "rev-parse", "--short=12", "HEAD")[1]
         r = run_check(root, c, args.timeout, False, args.seed)
         if not r["ok"]:
             die(f"{c['id']} does not pass, so its sync commit stays at {c.get('synced_commit') or '-'}", FAILED)
         path = root / MANIFEST_REL
-        write_keep(path, set_synced_commit(read_keep(path), c["id"], sha))
+        text = set_synced_commit(read_keep(path), c["id"], sha)
+        if other_shas:
+            table = "{ " + ", ".join(f'{n} = "{s}"' for n, s in sorted(other_shas.items())) + " }"
+            text = set_check_value(text, c["id"], "synced_sources", table, after="synced_commit")
+        write_keep(path, text)
         state = read_state(root)  # this rerun passed: record it, so `list` and the hook see it
         state[c["id"]] = {"fingerprint": fingerprint(root, c), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         write_state(root, state)
@@ -719,7 +877,8 @@ def cmd_hook(args) -> int:
         unchecked, unconfirmed = [], []
         for c in m["check"]:
             _, changed = stale_info(root, c)
-            if not changed:
+            # a repository this developer has not checked out is not a reason to block them
+            if not [f for f in changed if not f.startswith(MISSING)]:
                 continue
             fp = fingerprint(root, c)
             entry = state.get(c["id"], {})

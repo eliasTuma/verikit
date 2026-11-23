@@ -430,6 +430,90 @@ class CiMode(unittest.TestCase):
         self.assertEqual(vk("run", "--root", str(self.r.root), "--ci", "--changed")[0], 2)
 
 
+CROSS = GOOD.replace('covers = ["src/**/*.txt"]', 'covers = ["src/**/*.txt", "web:src/**/*.ts"]') + """
+    [sources.web]
+    path = "../../web"
+"""
+
+
+class CrossRepo(unittest.TestCase):
+    """A check in repo A (svc/) whose covers name files in a separate repo B (web/)."""
+
+    def setUp(self):
+        self.r = Repo(CROSS)
+        self.r.make_patch()
+        self.web = self.r.tmp.parent / (self.r.tmp.name + "-web")
+        # the manifest says ../../web relative to svc/: point it at our sibling folder by env
+        self.env = ci_env(VERIKIT_SOURCE_WEB=str(self.web))
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        (self.web / "src").mkdir(parents=True)
+        (self.web / "src" / "pay.ts").write_text("export const pay = 1;\n", encoding="utf-8")
+        for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.invalid"],
+                  ["config", "user.name", "t"], ["config", "core.autocrlf", "false"]):
+            git(self.web, *a)
+        self.web_commit("web init")
+        self.addCleanup(rmtree, self.web)
+        code, out = vk("sync", "guard", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.r.commit("sync")
+
+    def tearDown(self):
+        self.r.close()
+
+    def web_commit(self, msg: str) -> None:
+        git(self.web, "add", "-A")
+        git(self.web, "commit", "-qm", msg)
+
+    def test_sync_records_the_other_repos_commit(self):
+        sha = git(self.web, "rev-parse", "--short=12", "HEAD").strip()
+        text = (self.r.root / "verification" / "verification.toml").read_text(encoding="utf-8")
+        self.assertIn(f'synced_sources = {{ web = "{sha}" }}', text)
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 0, out)
+        self.assertIn("web", vk("list", "--root", str(self.r.root))[1])
+
+    def test_change_in_other_repo_is_drift(self):
+        (self.web / "src" / "pay.ts").write_text("export const pay = 2;\n", encoding="utf-8")
+        self.web_commit("change pay")
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1, out)
+        self.assertIn("changed: web:src/pay.ts", out)
+        self.assertIn("== guard", vk("run", "--root", str(self.r.root), "--changed")[1])
+        base = git(self.r.top, "rev-parse", "HEAD").strip()     # a PR in repo A that touches nothing
+        self.assertIn("== guard", vk("run", "--root", str(self.r.root), "--changed", base)[1])
+        reason = json.loads(vk("hook", stdin=json.dumps({"cwd": str(self.r.top)}))[1])["reason"]
+        self.assertIn("guard", reason)
+        self.assertEqual(vk("sync", "guard", "--root", str(self.r.root))[0], 0)
+        self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
+
+    def test_untracked_or_uncommitted_edit_in_other_repo_blocks_sync(self):
+        (self.web / "src" / "pay.ts").write_text("export const pay = 3;\n", encoding="utf-8")
+        code, out = vk("sync", "guard", "--root", str(self.r.root))
+        self.assertEqual(code, 2)
+        self.assertIn("web", out)
+
+    def test_missing_checkout_is_unknown_never_synced(self):
+        moved = self.web.with_name(self.web.name + "-moved")
+        self.web.rename(moved)
+        self.addCleanup(lambda: moved.exists() and moved.rename(self.web))
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1, out)
+        self.assertIn("unknown", out)
+        self.assertIn("VERIKIT_SOURCE_WEB", out)
+        # a developer without the other repo is not blocked by the hook for that alone
+        self.assertEqual(vk("hook", stdin=json.dumps({"cwd": str(self.r.top)}))[1].strip(), "")
+        with mock.patch.dict(os.environ, {"VERIKIT_SOURCE_WEB": str(moved)}):
+            self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
+
+    def test_unknown_source_prefix_is_rejected(self):
+        manifest = self.r.root / "verification" / "verification.toml"
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace("web:src", "mobile:src"), encoding="utf-8")
+        code, out = vk("list", "--root", str(self.r.root))
+        self.assertEqual(code, 2)
+        self.assertIn("[sources.mobile]", out)
+
+
 class Explorer(unittest.TestCase):
     MODEL = str(KIT / "examples" / "explorer" / "checkout_model.py")
 
