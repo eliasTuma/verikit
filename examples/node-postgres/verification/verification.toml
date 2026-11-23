@@ -1,0 +1,41 @@
+# Promises this repo verifies. Read by verikit: python verification/verikit.py run
+version = 1
+
+[[check]]
+id = "coupon-once"
+rule = "A coupon is redeemed at most once, even when two service instances handle requests for it at the same time."
+harm = "One coupon gives its discount to two orders: the shop pays the discount twice, and a leaked code can be used without limit."
+level = "code"
+tool = "fast-check scheduler ordering the real SQL statements of the real redeemCoupon() on two PostgreSQL connections"
+tags = ["coupons", "database"]
+# with_postgres.py starts PostgreSQL in Docker and removes it afterwards. It uses the
+# database in COUPON_DATABASE_URL instead, when that is set.
+run = "{python} verification/with_postgres.py node --test test/coupon.race.test.js"
+covers = ["src/coupons.js", "src/schema.sql"]
+harness = [
+  "test/coupon.race.test.js",
+  "test/support/scheduled-sql.js",
+  "test/support/testdb.js",
+  "verification/with_postgres.py",
+]
+bounds = "200 random statement orders per run; 2 connections, 1 coupon, 1 redeem call each; PostgreSQL 16 at READ COMMITTED; sampling, not exhaustive"
+assumes = [
+  "Every instance talks to the same PostgreSQL primary. Read replicas and other database engines were not run.",
+  "Transactions use the default isolation level, READ COMMITTED.",
+  "Between two SQL statements redeemCoupon() only computes: it awaits nothing else (no HTTP call, no timer).",
+  "Lost connections, statement timeouts and crashes in the middle of a transaction are out of scope.",
+]
+# Longer than the helper's own limits added up (image pull 300 s + start 210 s + test 180 s),
+# so the helper always stops by itself and removes its container before verikit gives up.
+timeout = 900
+synced_commit = ""
+
+  [[check.must_fail]]
+  why = "Broken variant: check-then-act (SELECT, decide in JavaScript, then an UPDATE that no longer checks)"
+  patch = "verification/coupons/mutants/check-then-act.patch"
+  match = 'coupon redeemed [2-9] times'
+
+  [[check.must_fail]]
+  why = "Broken variant: the UPDATE loses its condition `AND redeemed_by IS NULL`"
+  patch = "verification/coupons/mutants/no-unused-condition.patch"
+  match = 'coupon redeemed [2-9] times'
