@@ -38,3 +38,8 @@ timeout = 900
   why = "Broken variant: the UPDATE loses its condition `AND redeemed_by IS NULL`"
   patch = "verification/coupons/mutants/no-unused-condition.patch"
   match = 'coupon redeemed [2-9] times'
+
+# `run --isolated`: broken variants run in a throwaway copy of the repo. Dependency folders that
+# git ignores are linked into the copy (never copied, never deleted).
+[isolation]
+link = ["node_modules"]

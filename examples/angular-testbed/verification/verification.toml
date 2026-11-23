@@ -22,3 +22,8 @@ assumes = [
   why = "Broken variant: mergeMap instead of switchMap (the old request stays alive, so its reply can land after a newer query)"
   patch = "verification/search/mutants/merge-map.patch"
   match = 'stale results shown'
+
+# `run --isolated`: broken variants run in a throwaway copy of the repo. Dependency folders that
+# git ignores are linked into the copy (never copied, never deleted).
+[isolation]
+link = ["node_modules"]

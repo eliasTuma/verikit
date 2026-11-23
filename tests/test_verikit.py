@@ -741,6 +741,100 @@ class CiMode(unittest.TestCase):
         self.assertEqual(vk("run", "--root", str(self.r.root), "--ci", "--changed")[0], 2)
 
 
+TWO_CHECKS = GOOD + """
+    [[check]]
+    id = "second"
+    rule = "The second guard is always on."
+    run = "{python} check.py"
+    covers = ["src/**/*.txt"]
+      [[check.must_fail]]
+      why = "second guard removed"
+      edits = [{ file = "src/app.txt", find = "guard = on", replace = "guard = BROKEN" }]
+      match = 'RULE BROKEN'
+
+    [isolation]
+    link = ["deps"]
+"""
+
+WATCHING_CHECK = textwrap.dedent("""
+    import os
+    assert os.path.exists("deps/installed.txt"), "dependencies are missing"
+    with open(os.environ["TRACE_FILE"], "a") as f:
+        f.write(os.getcwd() + "|" + open("src/app.txt").read().strip() + "|" + str(os.path.exists("src/untracked.txt")) + "\\n")
+""") + CHECK_PY
+
+
+class IsolatedRuns(unittest.TestCase):
+    """`run --isolated`: broken variants are applied in a throwaway copy, never in the working files."""
+
+    def setUp(self):
+        self.r = Repo(TWO_CHECKS)
+        self.r.make_patch()
+        (self.r.top / ".gitignore").write_text("deps/\n", encoding="utf-8")
+        (self.r.root / "deps").mkdir()                      # a git-ignored dependency folder
+        (self.r.root / "deps" / "installed.txt").write_text("a dependency\n", encoding="utf-8")
+        (self.r.root / "check.py").write_text(WATCHING_CHECK, encoding="utf-8")
+        self.r.commit("two checks, ignored deps")
+        self.trace = self.r.tmp.parent / (self.r.tmp.name + "-trace.txt")
+        self.addCleanup(lambda: self.trace.unlink(missing_ok=True))
+        self.env = mock.patch.dict(os.environ, {"TRACE_FILE": str(self.trace)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def tearDown(self):
+        self.r.close()
+
+    def copies_left(self) -> list[Path]:
+        return list(Path(tempfile.gettempdir()).glob("verikit-iso-*"))
+
+    def test_variants_run_in_a_copy_and_the_real_tree_is_never_edited(self):
+        before = self.copies_left()
+        app = self.r.root / "src" / "app.txt"
+        (self.r.root / "src" / "untracked.txt").write_text("work in progress\n", encoding="utf-8")
+        code, out = vk("run", "--root", str(self.r.root), "--isolated", "--jobs", "2")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("[ok]   must fail"), 2, out)
+        runs = [line.split("|") for line in self.trace.read_text(encoding="utf-8").splitlines()]
+        real = os.path.realpath(self.r.root)
+        broken = [cwd for cwd, content, _ in runs if "BROKEN" in content]
+        self.assertEqual(len(broken), 2)
+        for cwd in broken:                                   # every broken run happened outside the repo
+            self.assertFalse(os.path.realpath(cwd).startswith(real), cwd)
+        self.assertEqual(len([1 for cwd, content, _ in runs if os.path.realpath(cwd) == real]), 2)  # "holds": real tree
+        self.assertTrue(all(seen == "True" for _, _, seen in runs))   # the copy has the uncommitted work too
+        self.assertEqual(app.read_text(encoding="utf-8"), "guard = on\n")
+        self.assertEqual(self.copies_left(), before)         # copies deleted ...
+        self.assertTrue((self.r.root / "deps" / "installed.txt").is_file())   # ... and the linked folder is intact
+
+    def test_closing_a_copy_never_follows_its_links(self):
+        m = verikit.load_manifest(self.r.root)
+        iso = verikit.IsolatedCopy(self.r.root, m)
+        self.assertTrue((iso.root / "deps" / "installed.txt").is_file())       # linked in
+        self.assertTrue((iso.root / "src" / "app.txt").is_file())              # copied
+        self.assertFalse((iso.root / ".git").exists())
+        iso.close()
+        self.assertFalse(iso.tmp.exists())
+        self.assertEqual((self.r.root / "deps" / "installed.txt").read_text(encoding="utf-8"), "a dependency\n")
+
+    def test_a_link_that_cannot_be_removed_stops_the_delete(self):
+        m = verikit.load_manifest(self.r.root)
+        iso = verikit.IsolatedCopy(self.r.root, m)
+        self.addCleanup(lambda: (verikit._unlink_dir(iso.root / "deps"), rmtree(iso.tmp)) if iso.tmp.exists() else None)
+        with mock.patch.object(verikit, "_unlink_dir", side_effect=OSError("in use")):
+            code_out = io.StringIO()
+            with contextlib.redirect_stderr(code_out):
+                iso.close()
+        self.assertTrue(iso.tmp.exists())                    # refused to delete a tree that still has a link
+        self.assertIn("still contains a link", code_out.getvalue())
+        self.assertTrue((self.r.root / "deps" / "installed.txt").is_file())
+
+    def test_missing_link_target_is_a_clear_error(self):
+        shutil.rmtree(self.r.root / "deps")
+        code, out = vk("run", "--root", str(self.r.root), "--isolated")
+        self.assertEqual(code, 2, out)
+        self.assertIn("[isolation] link: deps is not a folder", out)
+
+
 class ReportAndSummary(unittest.TestCase):
     def setUp(self):
         self.r = Repo(GOOD)

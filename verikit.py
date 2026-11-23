@@ -777,6 +777,101 @@ class AppliedVariant:
 
 # --------------------------------------------------------------------------- run
 
+# --------------------------------------------------------------------------- isolated copies
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or on Windows any reparse point (a junction is not a symlink to Python 3.11)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return os.path.islink(path) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+
+
+def _link_dir(target: Path, link: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))      # needs no admin rights, unlike symlinks
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def _unlink_dir(link: Path) -> None:
+    """Remove the link itself. Never follows it: the real folder stays as it is."""
+    if os.name == "nt":
+        os.rmdir(link)
+    else:
+        os.unlink(link)
+
+
+class IsolatedCopy:
+    """A throwaway copy of the repository in which broken variants are applied and run, so the
+    developer's (or agent's) working files are never edited, not even for a moment.
+
+    It holds every file git tracks or would track, as it is on disk now. Dependency folders
+    that git ignores (node_modules, ...) are not copied: the manifest's `[isolation] link`
+    names the ones to link in, and `setup` can install into the copy instead."""
+
+    def __init__(self, root: Path, manifest: dict):
+        cfg = manifest.get("isolation", {})
+        top = git_toplevel(root) or root
+        self.tmp = Path(tempfile.mkdtemp(prefix="verikit-iso-"))
+        self.top = self.tmp / "repo"
+        self.root = self.top / root.resolve().relative_to(top)
+        self.links: list[Path] = []
+        try:
+            p = subprocess.run(["git", "ls-files", "-z", "-co", "--exclude-standard", "--", *cfg.get("include", [])],
+                               cwd=top, capture_output=True)
+            if p.returncode != 0:
+                die(f"--isolated needs a git repository: {p.stderr.decode('utf-8', 'replace').strip()}")
+            for rel in p.stdout.decode("utf-8", "replace").split("\0"):
+                src = top / rel
+                if rel and src.is_file():
+                    dest = self.top / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+            self.root.mkdir(parents=True, exist_ok=True)
+            for rel in cfg.get("link", []):
+                target = (root / rel).resolve()
+                if not target.is_dir():
+                    die(f"[isolation] link: {rel} is not a folder in {root} (install dependencies first)")
+                _link_dir(target, self.root / rel)
+                self.links.append(self.root / rel)
+            if cfg.get("setup"):
+                code, out, _ = run_shell(cfg["setup"], self.root, int(cfg.get("setup_timeout", 1800)))
+                if code != 0:
+                    die(f"[isolation] setup failed in the copy (exit {code}):\n{tail(out)}")
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        """Delete the copy. Links are removed first, one by one, and the tree is deleted only
+        once no link is left in it, so deleting the copy can never reach a real folder."""
+        for link in self.links:
+            try:
+                if _is_link(link):
+                    _unlink_dir(link)
+            except OSError as e:
+                warn(f"could not remove link {link}: {e}")
+        left = [Path(d) / n for d, dirs, files in os.walk(self.tmp) for n in (*dirs, *files) if _is_link(Path(d) / n)]
+        if left:
+            warn(f"left {self.tmp} in place: it still contains a link ({left[0]}); remove it by hand")
+            return
+
+        def writable(func, path, _exc):
+            try:
+                os.chmod(path, 0o700)
+                func(path)
+            except OSError:
+                pass
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(self.tmp, onexc=writable)
+        else:
+            shutil.rmtree(self.tmp, onerror=writable)
+
+
 SEEDS_DIR = Path("verification") / "seeds"
 
 
@@ -818,56 +913,72 @@ def cmd_seed(args) -> int:
     return OK
 
 
-def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | None) -> dict:
+def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | None,
+              variant_root: Path | None = None, emit=print, main_lock=None) -> dict:
+    """Run one check: it must hold on the current code (and for every saved seed), and every
+    broken variant must fail with its message. With `variant_root` (an isolated copy) the
+    variants are applied and run there, so the real working files are never edited.
+    `main_lock` serialises the runs in the real tree when several checks run in parallel."""
     timeout = int(check.get("timeout", timeout))
     result = {"id": check["id"], "rule": check["rule"], "ok": True, "steps": []}
-    print(f"\n== {check['id']}  [{check.get('level', '?')} | {check.get('tool', '?')}]")
-    print(f"   rule: {check['rule']}")
+    emit(f"\n== {check['id']}  [{check.get('level', '?')} | {check.get('tool', '?')}]")
+    emit(f"   rule: {check['rule']}")
 
-    try:
-        main_cmd, src_env = with_sources(root, check, check["run"])
-    except VerikitError as e:
-        print(f"   [FAIL] holds on the current code: {e}")
-        result["steps"].append({"what": "holds on the current code", "ok": False, "exit": None, "output": str(e)})
-        result["ok"] = False
-        return result
-    code, out, secs = run_shell(main_cmd, root, timeout, seed, src_env)
-    passed = code == 0
-    print(f"   {'[ok]  ' if passed else '[FAIL]'} holds on the current code ({secs:.1f}s, exit {code})")
-    if not passed or verbose:
-        print(tail(out))
-    if not passed and seed is not None:
-        print(f"          to replay this case on every future run (if the test reads VERIKIT_SEED): "
-              f"{self_cmd(root)} seed add {check['id']} {seed}")
-    result["steps"].append({"what": "holds on the current code", "ok": passed, "exit": code,
-                            "seconds": round(secs, 2), "output": tail(out, 60)})
-    result["ok"] &= passed
-
-    for saved in saved_seeds(root, check["id"]):   # cases that failed once: replayed forever
-        if saved == seed:
-            continue
-        code, out, secs = run_shell(main_cmd, root, timeout, saved, src_env)
-        ok = code == 0
-        print(f"   {'[ok]  ' if ok else '[FAIL]'} holds with saved seed {saved} ({secs:.1f}s, exit {code})")
-        if not ok or verbose:
-            print(tail(out))
-        result["steps"].append({"what": f"holds with saved seed {saved}", "ok": ok, "exit": code,
+    def holds() -> dict[str, str] | None:
+        try:
+            main_cmd, src_env = with_sources(root, check, check["run"])
+        except VerikitError as e:
+            emit(f"   [FAIL] holds on the current code: {e}")
+            result["steps"].append({"what": "holds on the current code", "ok": False, "exit": None, "output": str(e)})
+            result["ok"] = False
+            return None
+        code, out, secs = run_shell(main_cmd, root, timeout, seed, src_env)
+        passed = code == 0
+        emit(f"   {'[ok]  ' if passed else '[FAIL]'} holds on the current code ({secs:.1f}s, exit {code})")
+        if not passed or verbose:
+            emit(tail(out))
+        if not passed and seed is not None:
+            emit(f"          to replay this case on every future run (if the test reads VERIKIT_SEED): "
+                  f"{self_cmd(root)} seed add {check['id']} {seed}")
+        result["steps"].append({"what": "holds on the current code", "ok": passed, "exit": code,
                                 "seconds": round(secs, 2), "output": tail(out, 60)})
-        result["ok"] &= ok
+        result["ok"] &= passed
+
+        for saved in saved_seeds(root, check["id"]):   # cases that failed once: replayed forever
+            if saved == seed:
+                continue
+            code, out, secs = run_shell(main_cmd, root, timeout, saved, src_env)
+            ok = code == 0
+            emit(f"   {'[ok]  ' if ok else '[FAIL]'} holds with saved seed {saved} ({secs:.1f}s, exit {code})")
+            if not ok or verbose:
+                emit(tail(out))
+            result["steps"].append({"what": f"holds with saved seed {saved}", "ok": ok, "exit": code,
+                                    "seconds": round(secs, 2), "output": tail(out, 60)})
+            result["ok"] &= ok
+        return src_env
+
+    if main_lock:
+        with main_lock:
+            src_env = holds()
+    else:
+        src_env = holds()
+    if src_env is None:
+        return result
+    vroot = variant_root or root   # where broken variants are applied and run
 
     for mf in check["must_fail"]:
         why = mf.get("why", "broken variant")
         try:
             cmd, _ = with_sources(root, check, mf.get("run", check["run"]))
             if mf.get("patch") or variant_edits(mf):
-                with AppliedVariant(root, mf):
-                    code, out, secs = run_shell(cmd, root, timeout, seed, src_env)
+                with AppliedVariant(vroot, mf):
+                    code, out, secs = run_shell(cmd, vroot, timeout, seed, src_env)
             else:
-                code, out, secs = run_shell(cmd, root, timeout, seed, src_env)
+                code, out, secs = run_shell(cmd, vroot, timeout, seed, src_env)
         except VerikitError as e:
             if e.code == ERROR:
                 raise
-            print(f"   [FAIL] must fail: {why}\n          {e}")
+            emit(f"   [FAIL] must fail: {why}\n          {e}")
             result["steps"].append({"what": f"must fail: {why}", "ok": False, "exit": None, "output": str(e)})
             result["ok"] = False
             continue
@@ -876,13 +987,56 @@ def run_check(root: Path, check: dict, timeout: int, verbose: bool, seed: int | 
         reason = "" if caught else (" - it PASSED, so this check cannot see that break" if code == 0
                                     else " - it timed out" if code == 124
                                     else " - it failed, but not with the expected message")
-        print(f"   {'[ok]  ' if caught else '[FAIL]'} must fail: {why} ({secs:.1f}s, exit {code}){reason}")
+        emit(f"   {'[ok]  ' if caught else '[FAIL]'} must fail: {why} ({secs:.1f}s, exit {code}){reason}")
         if not caught or verbose:
-            print(tail(out))
+            emit(tail(out))
         result["steps"].append({"what": f"must fail: {why}", "ok": caught, "exit": code,
                                 "seconds": round(secs, 2), "output": tail(out, 60)})
         result["ok"] &= caught
     return result
+
+
+def run_isolated(root: Path, manifest: dict, checks: list[dict], timeout: int, verbose: bool,
+                 seed: int, jobs: int) -> list[dict]:
+    """Run checks with their broken variants in throwaway copies of the repository. "Holds on
+    the current code" still runs in the real tree, one check at a time; variants of different
+    checks run side by side, one copy per job. Each check's output is printed when it is done."""
+    import queue
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    jobs = max(1, min(jobs, len(checks) or 1))
+    copies: list[IsolatedCopy] = []
+    free: queue.SimpleQueue = queue.SimpleQueue()
+    make_lock, main_lock, print_lock = threading.Lock(), threading.Lock(), threading.Lock()
+
+    def a_copy() -> IsolatedCopy:
+        try:
+            return free.get_nowait()
+        except queue.Empty:
+            with make_lock:
+                copies.append(IsolatedCopy(root, manifest))
+                return copies[-1]
+
+    def work(check: dict) -> dict:
+        lines: list[str] = []
+        iso = a_copy() if check["must_fail"] else None
+        try:
+            return run_check(root, check, timeout, verbose, seed, variant_root=iso.root if iso else None,
+                             emit=lines.append, main_lock=main_lock)
+        finally:
+            if iso:
+                free.put(iso)
+            with print_lock:
+                print("\n".join(lines), flush=True)
+
+    print(f"[verikit] isolated: broken variants run in a copy of the repository, not in your working "
+          f"files ({jobs} job{'s' if jobs > 1 else ''})")
+    try:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            return list(pool.map(work, checks))
+    finally:
+        for c in copies:
+            c.close()
 
 
 def changed_checks(root: Path, checks: list[dict], base: str) -> list[dict]:
@@ -1133,7 +1287,10 @@ def cmd_run(args) -> int:
           "property tests can read it from VERIKIT_SEED)")
     state = read_state(root)
     t0 = time.time()
-    results = [run_check(root, c, args.timeout, args.verbose, seed) for c in checks]
+    if args.isolated or args.jobs > 1:
+        results = run_isolated(root, m, checks, args.timeout, args.verbose, seed, args.jobs)
+    else:
+        results = [run_check(root, c, args.timeout, args.verbose, seed) for c in checks]
     for c, r in zip(checks, results):
         if r["ok"]:
             state[c["id"]] = {"fingerprint": fingerprint(root, c), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
@@ -2092,6 +2249,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", "-v", action="store_true")
     p.add_argument("--json", help="write results as JSON")
     p.add_argument("--junit", help="write results as JUnit XML (for CI test reports)")
+    p.add_argument("--isolated", action="store_true",
+                   help="apply and run broken variants in a throwaway copy of the repository, so your "
+                        "working files are never edited (see `[isolation]` in the manifest)")
+    p.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="run the variants of up to N checks side by side, one copy each (implies --isolated)")
     p.add_argument("--summary", metavar="FILE.md",
                    help="write a Markdown summary of this run (with --ci it also goes to the GitHub job "
                         "summary or the Azure run's Extensions tab)")

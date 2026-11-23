@@ -18,3 +18,8 @@ assumes = ["The Angular service only forwards HttpClient calls to this store."]
   why = "Broken variant: mergeMap instead of switchMap (old responses can land last)"
   patch = "verification/search/mutants/merge-map.patch"
   match = 'stale results shown'
+
+# `run --isolated`: broken variants run in a throwaway copy of the repo. Dependency folders that
+# git ignores are linked into the copy (never copied, never deleted).
+[isolation]
+link = ["node_modules"]

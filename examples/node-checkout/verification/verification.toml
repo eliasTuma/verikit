@@ -44,3 +44,8 @@ assumes = ["The fake provider deduplicates by idempotency key, as real providers
   # find-and-replace: survives edits elsewhere in the file, unlike a diff with context lines
   edits = [{ file = "src/checkout.js", find = 'amount: order.amount, idempotencyKey });', replace = 'amount: order.amount, idempotencyKey: `${idempotencyKey}-attempt-${attempt}` });' }]
   match = 'customer charged [2-9] times'
+
+# `run --isolated`: broken variants run in a throwaway copy of the repo. Dependency folders that
+# git ignores are linked into the copy (never copied, never deleted).
+[isolation]
+link = ["node_modules"]

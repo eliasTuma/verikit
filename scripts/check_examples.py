@@ -2,6 +2,7 @@
 
     python scripts/check_examples.py                 # all examples
     python scripts/check_examples.py dotnet-checkout # one example; SKIPPED counts as a failure
+    python scripts/check_examples.py --isolated      # broken variants in a throwaway copy (`run --isolated`)
 
 Each example says how to run it in examples/<name>/example.toml:
     setup = "npm ci"            # optional; {python} = this Python
@@ -68,6 +69,9 @@ def short_tmp() -> Path:
     return work
 
 
+RUN_ARGS: list[str] = []   # extra arguments for `verikit run`, e.g. --isolated
+
+
 def check(name: str) -> tuple[str, str]:
     sp = spec(name)
     setup, exes = sp.get("setup"), sp.get("needs", [])
@@ -97,7 +101,7 @@ def check(name: str) -> tuple[str, str]:
         sh(["git", "add", "-A"], repo)
         sh(["git", "commit", "-qm", "verikit"], repo)
         t0 = time.time()
-        code, out = sh([sys.executable, "verification/verikit.py", "run", "--seed", "1"], repo)
+        code, out = sh([sys.executable, "verification/verikit.py", "run", "--seed", "1", *RUN_ARGS], repo)
         summary = re.search(r"(\d+/\d+ checks OK.*)", out)
         variants = out.count("[ok]   must fail")
         if code != 0:
@@ -112,7 +116,8 @@ def check(name: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    named = sys.argv[1:]
+    RUN_ARGS.extend(a for a in sys.argv[1:] if a.startswith("--"))
+    named = [a for a in sys.argv[1:] if not a.startswith("--")]
     rows = [(n, *check(n)) for n in (named or all_examples())]
     print("\n" + "\n".join(f"{status:8} {name:22} {detail}" for name, status, detail in rows))
     if named and any(status == "SKIPPED" for _, status, _ in rows):

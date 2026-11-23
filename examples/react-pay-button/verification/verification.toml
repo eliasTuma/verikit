@@ -18,3 +18,8 @@ assumes = ["api.pay is the only way the component starts a payment."]
   why = "Broken variant: guard on React state instead of a ref (misses two clicks in one tick)"
   patch = "verification/pay/mutants/state-guard.patch"
   match = 'order paid [2-9] times'
+
+# `run --isolated`: broken variants run in a throwaway copy of the repo. Dependency folders that
+# git ignores are linked into the copy (never copied, never deleted).
+[isolation]
+link = ["node_modules"]
