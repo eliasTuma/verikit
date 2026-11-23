@@ -6,8 +6,9 @@
    and builds Release. It rebuilds on every run, so a broken-variant patch is always compiled in.
 2. vstest.console.exe runs only the tests the filter selects, and fails if it selects none.
 
-MSBuild.exe and vstest.console.exe come from Visual Studio 2017+ or Build Tools for Visual Studio,
-found with vswhere. Set VERIKIT_MSBUILD / VERIKIT_VSTEST to use other copies.
+MSBuild.exe and vstest.console.exe come from Visual Studio or Build Tools for Visual Studio,
+version 16.5 (2019) or newer: older MSBuild cannot restore packages.config. They are found
+with vswhere. Set VERIKIT_MSBUILD / VERIKIT_VSTEST to use other copies.
 """
 import os
 import subprocess
@@ -27,12 +28,13 @@ def locate(env: str, pattern: str, needs: str) -> str:
     if os.environ.get(env):
         return os.environ[env]
     if not VSWHERE.is_file():
-        fail(f"{VSWHERE} not found. Install Visual Studio 2017+ or Build Tools for Visual Studio "
+        fail(f"{VSWHERE} not found. Install Visual Studio 2019 16.5+ or Build Tools for Visual Studio "
              f"(with {needs}), or set {env}.")
-    out = subprocess.run([str(VSWHERE), "-latest", "-products", "*", "-find", pattern],
+    out = subprocess.run([str(VSWHERE), "-latest", "-products", "*", "-version", "16.5", "-find", pattern],
                          capture_output=True, text=True).stdout.strip().splitlines()
     if not out:
-        fail(f"vswhere found no {pattern}. Add {needs} in the Visual Studio Installer, or set {env}.")
+        fail(f"vswhere found no {pattern} in Visual Studio 16.5+. Add {needs} in the Visual Studio "
+             f"Installer, or set {env}.")
     return out[0]
 
 
@@ -56,9 +58,9 @@ def main() -> None:
     out = p.stdout + p.stderr
     print(out, flush=True)
     if "No test matches" in out or "No test is available" in out:
-        fail(f"no test ran. Check the filter ({test_filter}: MSTest uses TestCategory=, xUnit and NUnit "
-             "Category=), that the test file is listed in the test .csproj's <Compile> items, and "
-             "that the path is well under 260 characters.")
+        fail(f"no test ran. Check the filter ({test_filter}; MSTest filters on TestCategory=, an xUnit "
+             "trait on Category=), that the test file is listed in the test .csproj's <Compile> items, "
+             "and that the path is well under 260 characters.")
     sys.exit(p.returncode)
 
 

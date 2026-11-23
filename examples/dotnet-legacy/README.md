@@ -22,11 +22,13 @@ through 500 schedules. The seed comes from `VERIKIT_SEED`.
   built against, so no binding redirect is needed. The test adapter's `.props`/`.targets` are
   imported by hand.
 - **MSTest v2** (MSTest.TestFramework / MSTest.TestAdapter 2.2.10) is what Visual Studio's
-  "Unit Test Project (.NET Framework)" template writes. That makes it the most common shape of
-  legacy test project. Its filter property is `TestCategory`, not `Category`.
-- **Built by MSBuild.exe and run by vstest.console.exe** from Visual Studio or Build Tools.
-  `dotnet restore` does not restore `packages.config`, and `dotnet test` on a non-SDK test
-  project runs nothing and still exits 0.
+  "Unit Test Project (.NET Framework)" template writes, so it is a typical legacy test project.
+  Its filter property is `TestCategory`. With `/TestCaseFilter:Category=Verification`, vstest
+  matches no test and still exits 0.
+- **Built by MSBuild.exe and run by vstest.console.exe** from Visual Studio or Build Tools,
+  version 16.5 (2019) or newer. Older MSBuild cannot restore `packages.config`. `dotnet restore`
+  does not restore `packages.config` either, and `dotnet test` on a non-SDK test project runs
+  nothing and still exits 0.
 
 ## Run it
 
@@ -37,7 +39,9 @@ msbuild Legacy.sln -restore -p:RestorePackagesConfig=true -p:Configuration=Relea
 vstest.console.exe Billing.Tests\bin\Release\Billing.Tests.dll /TestCaseFilter:TestCategory=Verification
 ```
 
-With verikit, run inside a git repo. The manifest's `run` is one command,
+With verikit, run inside a git repo. If you copy this folder into a new repo on Windows, run
+`git config core.autocrlf false` before the first commit. Otherwise the broken-variant patch
+rewrites the file with CRLF and verikit refuses to revert it. The manifest's `run` is one command,
 `{python} verification/legacy_test.py Legacy.sln Billing.Tests/bin/Release/Billing.Tests.dll TestCategory=Verification`.
 That script finds MSBuild and vstest with `vswhere`, restores, rebuilds, and runs only the
 verification test. It fails when no test ran.
@@ -56,4 +60,7 @@ names the rule. With `--seed 1` the message is `customer charged 2 times for one
 events: customer pays -> timer rings -> request 1 reaches the gateway (late) -> request 2
 reaches the gateway (late)`.
 
-Keep the path short on Windows. .NET Framework test discovery fails silently near 260 characters.
+Keep the path short on Windows. The longest path under this folder after a restore is 137
+characters (`packages\MSTest.TestAdapter.2.2.10\build\_common\zh-Hant\...resources.dll`), so
+keep the folder itself under about 120 characters. .NET Framework test discovery also fails
+silently near 260 characters.
