@@ -42,7 +42,9 @@ python verification/verikit.py run --seed 12345 # replay a printed seed
 ```
 
 You need the .NET 8 SDK, with its ASP.NET Core runtime, which the `coyote` CLI uses. Nothing else
-has to be installed: the build restores the tool.
+has to be installed: the build restores the tool. In CI, `actions/setup-dotnet` with `8.0.x` is
+enough. The tool manifest pins `rollForward: false`, so a runner that has only a newer .NET needs
+the 8.0 runtime added. This example has run on Windows only so far.
 
 ## What a failure looks like
 
@@ -90,8 +92,8 @@ Measured on Windows 11 with the .NET 8.0.403 SDK:
 | Broken variant (no semaphore), `random` strategy | found in 200/200 seeds; first failing schedule median 1, max 4 |
 | Same, `prioritization` (PCT) strategy | 200/200 seeds; median 3, max 8 |
 | Passing run on the correct code | 1000 schedules in about 2-4 s |
-| `dotnet test` of the check | about 10 s cold, about 5 s warm (build + rewrite 0.5 s + 1000 schedules) |
-| `verikit run` (holds + 2 variants) | about 23 s |
+| `dotnet test` of the check | 5-17 s: MSBuild and the test host, about 0.5 s of rewriting, then the schedules |
+| `verikit run` (holds + 2 variants) | 23-32 s |
 
 1000 schedules is far more than this bug needs. The extra schedules cover the passing run and
 cost little.
@@ -104,7 +106,14 @@ cost little.
   with an instance count, or with a database-level guard (conditional update, unique constraint)
   and an integration test.
 - **.NET versions.** Coyote 1.7.11 (March 2024) ships `net8.0`, `net6.0`, `netcoreapp3.1` and
-  `netstandard2.0` libraries, and a `coyote` CLI for .NET Core / .NET 8. For .NET Framework, the
-  docs list net462 and a separate `Microsoft.Coyote.Tool` package has a net462 `coyote.exe`. The kit
-  has not run Coyote on `net48`. The current CLI is a .NET 8 process, and the Coyote repository's
-  own assessment says `net10.0` test assemblies need a workaround.
+  `netstandard2.0` libraries, and a `coyote` dotnet tool for .NET Core / .NET 8. This example
+  targets `net8.0` only.
+  - **`net48`, tried once by hand on Windows, not part of this example:** the same test project,
+    multi-targeted `net8.0;net48`, works if the `net48` output is rewritten with the net462
+    `coyote.exe` from the `Microsoft.Coyote.Tool` 1.7.11 package (fetched with a
+    `<PackageDownload>`). The check passed, and the semaphore-free variant failed with the same
+    message. If the dotnet tool rewrites the `net48` dlls instead, `dotnet test` says "No test is
+    available".
+  - **`net10.0`:** the CLI is a .NET 8 process. The Coyote repository's own compatibility
+    assessment says `net10.0` test assemblies need a workaround and are not fully supported in
+    1.7.11.
