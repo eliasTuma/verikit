@@ -1,0 +1,5 @@
+# How scripts/check_examples.py runs this example.
+# It also needs Chrome or Chromium: karma-chrome-launcher finds an installed Chrome, or set
+# CHROME_BIN. Chrome is not listed under `needs` because it is not on PATH on Windows.
+setup = "npm ci --no-audit --no-fund"
+needs = ["node", "npm"]
