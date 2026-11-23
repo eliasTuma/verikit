@@ -13,9 +13,13 @@ model of the design) and/or **hundreds of generated orderings of the real code**
 tests inside your own test projects), with proof that every check can actually fail.
 
 It is a small Python runner (stdlib only), three agent skills (also installable as a Claude
-Code plugin), seven runnable examples for .NET (including legacy .NET Framework and Coyote),
-Node, React and Angular, and CI templates for GitHub Actions and Azure Pipelines. Version
-**0.3.1**; see [what has been tested](#supported-stacks).
+Code plugin), eight runnable examples for .NET (including legacy .NET Framework and Coyote),
+Node (including a real PostgreSQL race), React and Angular, and CI templates for GitHub Actions
+and Azure Pipelines. Version **0.4.0**; see [what has been tested](#supported-stacks).
+
+**Where it stands:** every example runs in CI on Linux and Windows, but all of them are small
+programs written for the kit. It has not yet been used on a large production codebase; treat
+your first promise on real code as a pilot.
 
 ---
 
@@ -41,12 +45,17 @@ performance. Keep your tests; this is for the promises they cannot reach.
    **property or concurrency test** in the code's own test project (FsCheck, fast-check, ...)
    or a code verifier where the language has one.
 3. **A check you have never seen fail proves nothing.** Every check lists `must_fail`
-   variants - a patch that removes a guard, a model constant that disables it, a witness that
-   the good thing can happen at all. `verikit run` fails if any of them *passes*.
+   variants - a find-and-replace edit or patch that removes a guard, a model constant that
+   disables it, a witness that the good thing can happen at all. `verikit run` fails if any of
+   them *passes*.
 4. **Record what it covers.** Each check names its files, and `verikit sync` records the content
    it was last confirmed against. `verikit stale` flags drift; `/verify-maintain` decides drift vs. real bug.
-5. **Enforce it.** CI runs the checks whose code changed on every PR and reports JUnit like
-   your tests. A Stop hook keeps agents from finishing with unchecked edits.
+5. **Keep the model honest.** A model checks the design, not the code. `verikit trace` replays
+   what the real code did in tests against the model and reports the first step the model does
+   not allow, so a model that has drifted from the code cannot keep passing.
+6. **Enforce it.** CI runs the checks whose code changed on every PR, reports JUnit like your
+   tests and writes a plain summary on the pull request. A Claude Code hook keeps an agent from
+   finishing while code it changed is unchecked.
 
 Details: [docs/methodology.md](docs/methodology.md) · [docs/combining-with-tests.md](docs/combining-with-tests.md)
 
@@ -58,7 +67,8 @@ Details: [docs/methodology.md](docs/methodology.md) · [docs/combining-with-test
 | **.NET Framework** (net48, SDK-style project) | yes | same test, multi-targeted `net8.0;net48` | **ran on Windows** |
 | **.NET Framework, legacy (non-SDK) projects** (packages.config, MSTest v2) | yes | FsCheck; MSBuild build + `vstest.console` via `legacy_test.py` | **ran on Windows** - [examples/dotnet-legacy](examples/dotnet-legacy) |
 | **.NET async/Task races** (Microsoft Coyote 1.7.11, net8.0) | - | systematic exploration of real `async` interleavings | **ran** - [examples/dotnet-coyote](examples/dotnet-coyote) |
-| **Node backend** | yes | fast-check `fc.scheduler()` on real handlers | **ran** - [examples/node-checkout](examples/node-checkout) |
+| **Node backend** | yes | fast-check `fc.scheduler()` on real handlers; recorded traces replayed against the model | **ran** - [examples/node-checkout](examples/node-checkout) |
+| **Database-backed promises** (PostgreSQL 16, two real connections for two service instances) | yes | fast-check schedules the real SQL statements of both connections | **ran** - [examples/node-postgres](examples/node-postgres); SQL Server and .NET: pattern described, not run |
 | **React** | yes | fast-check + Testing Library (Vitest) | **ran** - [examples/react-pay-button](examples/react-pay-button) |
 | **Angular** - RxJS services/stores | yes | fast-check (Vitest) | **ran** - [examples/angular-search-store](examples/angular-search-store) |
 | **Angular** - TestBed through `ng test` (Karma + Jasmine, headless Chrome) | yes | fast-check + `HttpTestingController`, asserted on the DOM | **ran** - [examples/angular-testbed](examples/angular-testbed); Jest and the Angular 21 Vitest runner tried by hand only |
@@ -139,10 +149,13 @@ machine has the tools for.
 |---|---|---|
 | `doctor [--depth N]` | Lists every project (.NET Framework vs .NET, legacy project format, React, Angular, Node backend...), its test frameworks, the tools installed, and what fits. | 0 |
 | `init [--hook] [--ci github,azure\|both] [--no-skills] [--force]` | Scaffolds `verification/` in the current folder (monorepo-aware); in another root, adds that root to the existing CI workflow. | 0 / 2 |
-| `run [ID...] [--tag T] [--changed [REF] \| --ci] [--junit F] [--json F] [--seed N]` | Each check must pass; each `must_fail` must fail with its `match`. `--ci` = in a PR build (GitHub Actions, Azure Pipelines, GitLab) only the checks whose files changed vs the target branch, else all. `--changed REF` = vs `REF...HEAD`; bare `--changed` = vs each sync commit. The seed is exported as `VERIKIT_SEED`. | 0 / 1 / 2 |
+| `run [ID...] [--tag T] [--changed [REF] \| --ci] [--isolated] [--jobs N] [--seed N] [--junit F] [--json F] [--summary F.md]` | Each check must pass; each `must_fail` must fail with its `match`. `--ci` = in a PR build (GitHub Actions, Azure Pipelines, GitLab) only the checks whose files changed vs the target branch, else all. `--changed REF` = vs `REF...HEAD`; bare `--changed` = vs each sync record. `--isolated` applies broken variants in a throwaway copy of the repo, never in your working files; `--jobs N` runs variants of N checks side by side. `--summary` writes a Markdown summary (with `--ci` also to the GitHub job summary or the Azure run page). The seed is exported as `VERIKIT_SEED`; saved seeds are replayed. | 0 / 1 / 2 |
 | `stale [--strict]` | Checks whose covered content differs from what their last `sync` recorded. Needs no git history: it survives squash merges, rebases and shallow clones. | 0 / 1 |
 | `sync ID...` | Reruns the check, then records the content it confirmed in `verification/sync/<id>.json` (commit it with your change). | 0 / 1 / 2 |
 | `list [--tag T]` | Rule, harm, covers, bounds, variants, sync state, last local pass. | 0 |
+| `report [--md F] [--html F]` | Every promise with its checks, scope, variants and sync status, for people who do not read CI logs. Runs nothing. A stale or unknown check is never shown as green. | 0 |
+| `seed add ID SEED [--note T]` / `seed list` | Keep the seed of a failing random case in `verification/seeds/<id>.txt`; every later `run` replays it. | 0 / 2 |
+| `trace MODEL [TRACES] [--record CMD] [--const K=V] [--exact]` | Replays traces recorded from the real code against a TLA+ model (TLC) or a Python model. Fails with the first observation the model cannot reach. Nothing recorded is an error. | 0 / 1 / 2 |
 | `tlc SPEC.tla [-c CFG] [--const K=V] [--inv NAME]` | TLC on local Java, else Docker. Shortest counterexample as per-step changes; TLC warnings surfaced; a self-contradicting action is an error (vacuous pass). | 0 / 1 / 2 |
 | `explore MODEL.py` | Breadth-first explorer for small Python models; zero install. | 0 / 1 / 2 |
 | `hook` | Claude Code hook for SessionStart and Stop. Blocks (JSON `decision: block`) while covered code **this session** changed is unchecked; reminds once when a passing check's sync record is older than the code; lists checks that were already out of date when the session began instead of blaming the agent; never blocks twice in a row. | 0 |
@@ -192,8 +205,20 @@ harness = ["tests/Payments.Tests/CheckoutVerificationTests.cs"]     # the check'
 `{verikit}` expands to the runner, `{python}` to the interpreter. `run` is any shell command,
 executed in the folder that holds `verification/`.
 
+More manifest options:
+
+- **Cover one function, not a whole file:** `covers = ["src/Payments/CheckoutService.cs#PayForOrder"]`.
+  Edits elsewhere in the file are then not drift. If the name disappears, `stale` says
+  "anchor not found" and `sync` refuses.
+- **Broken variant by find-and-replace:**
+  `edits = [{ file = "src/pay.js", find = 'if (order.paid) return;', replace = '' }]`. `find` must
+  match exactly once. Unlike a diff, it keeps applying when code around the guard changes.
+- **Variants in a throwaway copy:** `[isolation] link = ["node_modules"]`, then
+  `run --isolated`: your working files are never edited.
+- **Saved seeds:** `verification/seeds/<id>.txt`, written by `verikit seed add`.
+
 Frontend and backend in **separate repositories**: add `[sources.web] path = "../web-app"` and
-cover `web:src/app/checkout/**/*.ts`; `sync` records that repo's commit too, and `stale`, `--ci`
+cover `web:src/app/checkout/**/*.ts`; `sync` records that repo's content too, and `stale`, `--ci`
 and the hook report drift there. Details: [combining-with-tests](docs/combining-with-tests.md#frontend-and-backend-in-separate-repositories).
 
 ## Repository layout
@@ -202,7 +227,7 @@ and the hook report drift there. Details: [combining-with-tests](docs/combining-
 verikit.py                 the runner (single file, stdlib only)
 plugin/skills/             verify-survey, verify-create (+ routing, stacks/), verify-maintain
 templates/                 tla/ starter, dotnet/ node/ react/ test skeletons, ci/ (GitHub, Azure), CODEOWNERS
-examples/                  seven runnable examples, each with broken variants (see examples/README.md)
+examples/                  eight runnable examples, each with broken variants (see examples/README.md)
 scripts/                   check_examples.py (all examples), e2e.py (monorepo + CI end-to-end),
                            check_ci_templates.py (CI templates against the official schemas)
 tests/                     unit tests for the runner
@@ -218,6 +243,9 @@ AGENTS.md                  the agent guide
   not close it. Property tests sample: a pass is evidence, not proof.
 - Across separate repositories verikit tracks drift only; broken-variant patches run in the
   repository that owns the check. Checks run one after another (no parallelism yet).
+- Not yet proven on a large production codebase: every example is a small program with clean
+  seams for fakes. Code tied to static calls, framework plumbing or a database needs a seam (or
+  the two-connection pattern) first.
 - See [docs/roadmap.md](docs/roadmap.md) for what is next.
 
 ## Credits and license

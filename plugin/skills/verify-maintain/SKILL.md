@@ -40,9 +40,15 @@ a rule to make it pass.
    unless the change makes them wrong, and report it if you shrink one.
 5. **Rerun and judge.**
    - Pass: re-prove it can fail. Every `must_fail` must still fail; if the code gained a
-     new guard, add a broken variant for that guard alone. A broken-variant patch that "does
-     not apply" is verification drift too: regenerate it against the new code
-     (`git diff --relative` from the folder holding `verification/`), never delete it.
+     new guard, add a broken variant for that guard alone. A broken variant that no longer
+     applies (a patch that "does not apply", an edit whose `find` text "was not found") is
+     verification drift too: point it at the guard's current text, never delete it. Prefer
+     turning a brittle patch into `edits = [{ file, find, replace }]`.
+   - `anchor not found` on a `file#Name` cover means the function was renamed or moved: find
+     where the promise's code lives now, read it against the model, then fix the cover.
+   - If the promise has a conformance check (`verikit trace`), a `TRACE REJECTED` after a
+     code change is the strongest sign of drift: it shows the exact observation the model
+     cannot reach. Decide from the code which side is wrong.
    - Fail: replay the counterexample on the real code. A step the code cannot take means the
      model is wrong - fix it and say what was wrong. If every step can happen, it is a bug:
      name the commit that introduced it, tell the steps in the code's words, state the harm.

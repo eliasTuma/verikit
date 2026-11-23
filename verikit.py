@@ -4,20 +4,25 @@
 A repo lists its promises in verification/verification.toml. Each [[check]] has a
 plain-English rule, ONE command that checks it (a TLA+ model, a property test in your
 own test project, a code-level verifier - any tool, any language), the files it covers,
-broken variants that MUST fail, and the commit where it last matched the code.
+broken variants that MUST fail, and a record of the content it was last confirmed against.
 
     python verikit.py doctor                 stacks, test frameworks and tools found; what fits
     python verikit.py init [--hook] [--ci github,azure]
-                                             scaffold verification/ (+ skills, Stop hook, CI)
+                                             scaffold verification/ (+ skills, hooks, CI)
     python verikit.py list                   every check: rule, covers, bounds, sync state
+    python verikit.py report [--md F|--html F]   every promise and where it stands (runs nothing)
     python verikit.py run [ID ...]           run checks; every must_fail variant has to FAIL
-          [--tag T] [--changed [REF] | --ci] [--junit FILE] [--json FILE] [--seed N]
-    python verikit.py stale [--strict]       checks whose covered code changed since their sync commit
-    python verikit.py sync ID ...            re-run, then record HEAD as the sync commit
+          [--tag T] [--changed [REF] | --ci] [--isolated] [--jobs N] [--seed N]
+          [--junit FILE] [--json FILE] [--summary FILE.md]
+    python verikit.py stale [--strict]       checks whose covered content changed since their last sync
+    python verikit.py sync ID ...            re-run, then record that content in verification/sync/
+    python verikit.py seed add ID SEED       keep a failing case; `run` replays saved seeds
     python verikit.py tlc SPEC.tla [-c CFG] [--const K=V] [--inv NAME]
                                              TLA+ model checker (local Java, else Docker)
+    python verikit.py trace MODEL [TRACES] [--record CMD]
+                                             recorded runs of the real code must be allowed by the model
     python verikit.py explore MODEL.py       built-in breadth-first explorer (zero install)
-    python verikit.py hook                   Claude Code Stop hook
+    python verikit.py hook                   Claude Code SessionStart + Stop hook
     python verikit.py version
 
 Exit codes: 0 = holds / all good, 1 = a property or check failed, 2 = tool or setup error.
@@ -48,7 +53,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"  # official v1.7.4 asset
@@ -1042,7 +1047,7 @@ def run_isolated(root: Path, manifest: dict, checks: list[dict], timeout: int, v
 
 def changed_checks(root: Path, checks: list[dict], base: str) -> list[dict]:
     """Checks whose covered files (or any verification file) changed. With `base`, against
-    base...HEAD plus uncommitted edits (for PRs); without, against each check's sync commit."""
+    base...HEAD plus uncommitted edits (for PRs); without, against each check's sync record."""
     _, dirty_v = git(root, "status", "--porcelain", "--", "verification")
     v_changed = bool(dirty_v.strip())
     if base and not v_changed:
@@ -1058,7 +1063,7 @@ def changed_checks(root: Path, checks: list[dict], base: str) -> list[dict]:
         if base:
             _, out = git(root, "diff", "--name-only", f"{base}...HEAD", "--", *pathspecs(c))
             _, dirty = git(root, "status", "--porcelain", "--", *pathspecs(c))
-            # other repositories have no PR base here: compare them with their sync commit
+            # other repositories have no PR base here: compare them with their sync record
             other = [f for f in stale_info(root, c)[1] if _source_of(f, c)[0]] if source_globs(c) else []
             if out.strip() or dirty.strip() or other:
                 picked.append(c)
@@ -2391,6 +2396,7 @@ version = 1
 # tags = ["payments"]
 # run = "{verikit} tlc verification/checkout/Checkout.tla"            # ONE command, exit 0 = holds
 # covers = ["src/Payments/**/*.cs", "web/src/app/checkout/**/*.ts"]   # product code this check describes
+#          # or one function, so other edits in a big file are not drift: "src/Payments/Checkout.cs#PayForOrder"
 # harness = ["tests/Payments.Tests/CheckoutVerificationTests.cs"]     # the check's own test files outside verification/
 # bounds = "1 order, up to 3 attempts"
 # assumes = ["The payment provider deduplicates by idempotency key"]
@@ -2405,6 +2411,15 @@ version = 1
 #   why = "Reachability witness: a charge can happen at all"
 #   run = "{verikit} tlc verification/checkout/Checkout.tla --inv NeverCharged"
 #   match = 'VIOLATION\\] NeverCharged\\b'
+#
+#   [[check.must_fail]]       # in a code check: break the guard itself, by find-and-replace ...
+#   why = "Broken variant: the paid check is gone"
+#   edits = [{ file = "src/Payments/Checkout.cs", find = 'if (order.IsPaid) return;', replace = '' }]
+#   match = 'customer charged [2-9] times'
+#   # ... or with a patch file: patch = "verification/checkout/mutants/no-paid-check.patch"
+
+# [isolation]                 # for `run --isolated`: variants run in a throwaway copy of the repo
+# link = ["node_modules"]     # git-ignored dependency folders to link into the copy
 '''
 
 
@@ -2541,7 +2556,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tag", action="append", default=[], help="only checks with this tag (repeatable)")
     p.add_argument("--changed", nargs="?", const="", default=None, metavar="REF",
                    help="only checks whose covered files changed: vs REF...HEAD (e.g. origin/main), "
-                        "or vs each check's sync commit when REF is omitted")
+                        "or vs each check's sync record when REF is omitted")
     p.add_argument("--ci", action="store_true",
                    help="in CI: on a pull request (GitHub Actions, Azure Pipelines, GitLab) run only the "
                         "checks whose files changed vs the target branch; otherwise run every check")
@@ -2560,13 +2575,13 @@ def main(argv: list[str] | None = None) -> int:
                         "summary or the Azure run's Extensions tab)")
     p.set_defaults(fn=cmd_run)
 
-    p = sub.add_parser("stale", parents=[common], help="checks whose covered code changed since their sync commit")
+    p = sub.add_parser("stale", parents=[common], help="checks whose covered content changed since their last sync")
     p.add_argument("ids", nargs="*")
     p.add_argument("--tag", action="append", default=[])
     p.add_argument("--strict", action="store_true", help="exit 1 when anything is stale (for CI)")
     p.set_defaults(fn=cmd_stale)
 
-    p = sub.add_parser("sync", parents=[common], help="re-run checks, then record HEAD as their sync commit")
+    p = sub.add_parser("sync", parents=[common], help="re-run checks, then record the content they confirmed (verification/sync/)")
     p.add_argument("ids", nargs="+")
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--seed", type=int)
@@ -2593,11 +2608,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--depth", type=int, default=6)
     p.set_defaults(fn=cmd_doctor)
 
-    sub.add_parser("hook", help="Claude Code Stop hook (reads hook JSON on stdin)").set_defaults(fn=cmd_hook)
+    sub.add_parser("hook", help="Claude Code SessionStart and Stop hook (reads hook JSON on stdin)").set_defaults(fn=cmd_hook)
     sub.add_parser("version", help="print the runner version").set_defaults(fn=lambda a: print(f"verikit {VERSION}") or OK)
 
     p = sub.add_parser("init", parents=[common], help="scaffold verification/ in this folder")
-    p.add_argument("--hook", action="store_true", help="add the Claude Code Stop hook")
+    p.add_argument("--hook", action="store_true", help="add the Claude Code hooks (SessionStart baseline + Stop check)")
     p.add_argument("--ci", type=ci_list, default=[], metavar="github,azure",
                    help="add CI workflow(s): github, azure, or both (comma-separated); run again in each "
                         "monorepo root to add that root to the workflow")

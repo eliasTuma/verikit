@@ -88,6 +88,44 @@ harness = ["web:src/app/checkout/pay.verification.spec.ts"]
   repositories:` entry and a second `checkout:` step; with more than one checkout step Azure puts
   `self` under `$(Build.SourcesDirectory)/<repo name>`, so adjust the template's `workingDirectory`.
 
+## Keeping it quiet and fast on a large repository
+
+- **Narrow covers.** A check that covers `src/Payments/**` is stale after every edit there, and
+  people stop reading warnings they see daily. Cover the files the promise lives in, or one
+  function: `"src/Payments/CheckoutService.cs#PayForOrder"`.
+- **Variants that survive refactors.** A patch with context lines stops applying when nearby code
+  changes. `edits = [{ file, find, replace }]` names only the guard's own text.
+- **Hands off the working tree.** `run --isolated` applies broken variants in a throwaway copy of
+  the repository (what git tracks or would track, as it is on disk), so a run cannot collide with
+  uncommitted work, an IDE or a file watcher. `--jobs N` runs the variants of N checks side by
+  side; "holds on the current code" still runs in the real tree, one check at a time. List
+  git-ignored dependency folders under `[isolation] link` (they are linked, never copied or
+  deleted), or give a `setup` command to install into the copy. A .NET solution builds from
+  scratch in the copy, so the first variant there is slower than in place.
+- **Random failures become permanent tests.** A failed run prints
+  `verikit seed add <id> <seed>`. Saved seeds (`verification/seeds/<id>.txt`) are replayed on every
+  run. The CI templates also run every check nightly with a new random seed.
+- **A page people can read.** `run --summary verify.md` (automatic with `--ci`: the GitHub job
+  summary, or the Extensions tab of an Azure run) lists each promise, the failing step and the
+  replay command. `verikit report --html status.html` shows every promise and its sync status
+  without running anything.
+
+## When the model and the code disagree: `verikit trace`
+
+A design check proves things about the model. If the code drifts, the model keeps passing. A
+conformance check closes that gap from the code's side:
+
+1. A test records, for many orderings, the values of the model's variables as the real code
+   runs: one JSON object per observation, one trace per line, appended to the file named by
+   `VERIKIT_TRACE_FILE`. It asserts nothing; it writes down what happened.
+2. `run = '{verikit} trace verification/checkout/Checkout.tla --record "node --test test/checkout.trace.test.js"'`
+   replays every distinct trace against the model with TLC and fails with the first observation
+   the model cannot reach.
+
+By default the model may take steps the recording did not see; `--exact` forbids that. It shows
+that the code stays inside the model, not that the code can do everything the model can.
+Worked example: `checkout-conformance` in `examples/node-checkout`.
+
 ## Mutation testing
 
 Stryker.NET and StrykerJS mutate code broadly and report which mutants no test kills. verikit's

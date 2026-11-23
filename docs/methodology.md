@@ -38,17 +38,18 @@ call was slow, not dead; it lands, the retry lands, and the customer is charged 
 6. **Few promises, chosen well.** 3-10 per product, where a bug costs the most and tests reach
    the least (`/verify-survey`). Keep your tests for everything else.
 
-## Two levels, and why both
+## Three kinds of check, and why
 
-| | Design check (TLA+ model) | Code check (property test) |
-|---|---|---|
-| Covers | every ordering within the bounds | the real code, including what the model left out |
-| Blind to | code that no longer matches the model | orderings it did not sample |
-| Breaks when | the design is wrong | the code is wrong |
+| | Design check (TLA+ model) | Code check (property test) | Conformance check (`verikit trace`) |
+|---|---|---|---|
+| Covers | every ordering within the bounds | the real code, including what the model left out | whether the real code stays inside the model |
+| Blind to | code that no longer matches the model | orderings it did not sample | behaviour the model allows but the code never shows |
+| Breaks when | the design is wrong | the code is wrong | the code and the model disagree |
 
 In the kit's end-to-end test (`scripts/e2e.py`), a commit reintroduces the double charge in
-code. The design check stays green, because the model never saw the change; the code check,
-`stale` and the Stop hook all catch it.
+code. The design check stays green, because the model never saw the change. The code check
+fails; the conformance check fails too, showing the exact observation (a second charge) that
+the model cannot reach; `stale` and the Stop hook flag the change.
 
 ## Where this comes from
 

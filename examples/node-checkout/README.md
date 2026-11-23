@@ -1,10 +1,18 @@
 # node-checkout
 
-A Node `payForOrder()` that retries a payment when the provider is slow, verified at two levels:
+A Node `payForOrder()` that retries a payment when the provider is slow, verified three ways:
 
 - **design:** `verification/checkout/Checkout.tla`, a TLA+ model where requests and replies
   arrive late and in any order, checked by `verikit tlc`;
-- **code:** `test/checkout.race.test.js`, fast-check's scheduler driving the real function.
+- **code:** `test/checkout.race.test.js`, fast-check's scheduler driving the real function;
+- **conformance:** `test/checkout.trace.test.js` records what the real function does (requests
+  sent, charges made, the outcome) for 200 orderings, and `verikit trace` replays those traces
+  against the model. If the code and the model disagree, it shows the first step the model
+  cannot reach. Its two broken variants are the code with a per-attempt key, and the model with
+  the wrong retry bound.
+
+The code check's broken variant is a find-and-replace edit, and `[isolation]` in the manifest
+lets `verikit run --isolated` apply it in a throwaway copy instead of your working files.
 
 ```sh
 npm install

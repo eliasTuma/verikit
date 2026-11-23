@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0 - 2026-11-24
+
+Aimed at what makes a team stop using a tool like this in its first month: noise, brittle
+variants, slow or intrusive runs, results nobody reads, and a model that drifts from the code.
+
+- **Function-level covers:** `covers = ["src/CheckoutService.cs#PayForOrder"]` watches one
+  declaration (overloads and the attributes or decorators above it included; brace languages
+  and Python; `verikit:begin NAME` / `verikit:end NAME` comments for anything else). Edits
+  elsewhere in the file are not drift. A name that is not found is loud: `stale` says
+  "anchor not found" and `sync` refuses.
+- **Find-and-replace broken variants:** `edits = [{ file, find, replace }]`. `find` must match
+  exactly once; line endings are kept; files are restored from byte-exact backups. Unlike a
+  diff, it keeps applying when code around the guard changes.
+- **Saved seeds:** a failed run prints `verikit seed add <id> <seed>`; `run` replays every seed in
+  `verification/seeds/<id>.txt` as its own step. Both CI templates run nightly with new random
+  seeds.
+- **`report` and `run --summary`:** every promise with its checks and sync status as Markdown
+  or HTML; a run summary with the failing step and the replay command, published to the
+  GitHub job summary or the Extensions tab of an Azure run with `--ci`. A passing check whose
+  sync record is stale, missing or unknown is shown as a warning, never as plain green.
+- **`run --isolated [--jobs N]`:** broken variants are applied and run in a throwaway copy of
+  the repository, so working files are never edited. Variants of different checks run side by
+  side; "holds on the current code" stays in the real tree. `[isolation] link` links
+  git-ignored dependency folders into the copy; deleting the copy never follows a link. All
+  eight examples pass with `--isolated` on Windows.
+- **`verikit trace`:** traces recorded from the real code in tests are replayed against the
+  TLA+ model (TLC) or a Python model; the first observation the model cannot reach is
+  reported. `examples/node-checkout` gains a conformance check; in the end-to-end test it goes
+  red on the regression that the design check misses.
+- **`examples/node-postgres`:** a coupon is redeemed at most once across two service
+  instances, checked with two real PostgreSQL connections whose SQL statements fast-check
+  schedules. Ran on PostgreSQL 16 only.
+- README states plainly that the kit has not yet been used on a large production codebase.
+
 ## 0.3.1 - 2026-11-24
 
 Two bugs that broke the kit in an ordinary team workflow, plus one portability bug. Upgrade by

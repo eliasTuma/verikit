@@ -59,7 +59,8 @@ jobs:
           path: ~/.cache/verikit
           key: verikit-tla-1.7.4
       # angular-testbed uses the runner's Google Chrome (headless)
-      - run: python scripts/check_examples.py node-checkout react-pay-button angular-search-store angular-testbed dotnet-coyote
+      # node-postgres starts postgres:16-alpine in Docker (Linux containers only)
+      - run: python scripts/check_examples.py node-checkout react-pay-button angular-search-store angular-testbed dotnet-coyote node-postgres
       - run: python scripts/e2e.py
       - name: broken variants in a throwaway copy (run --isolated)
         run: python scripts/check_examples.py --isolated node-checkout react-pay-button dotnet-coyote

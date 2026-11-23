@@ -64,6 +64,8 @@ their own commit, separate from product fixes.
 python verification/verikit.py run --changed           # checks whose covered code changed
 python verification/verikit.py run <id> --seed <N>     # replay a failure with the seed it printed
 python verification/verikit.py list                    # what exists, what is stale
+python verification/verikit.py run <id> --isolated     # variants in a throwaway copy: your working files stay untouched
+python verification/verikit.py report                  # every promise and its status, for a human
 ```
 
 - **A check fails on the current code:** it is a finding until proven otherwise. Replay the
@@ -79,6 +81,11 @@ python verification/verikit.py list                    # what exists, what is st
   what this session changed. Checks that were already out of date are listed once at the
   start of the session: leave them unless your task touches their code, and mention them.
   (Recorded live: [docs/evidence/live-stop-hook.md](docs/evidence/live-stop-hook.md).)
+- **A property test failed with a random seed:** keep the case with
+  `verikit seed add <id> <seed> --note "..."` and commit `verification/seeds/<id>.txt`; every
+  later run replays it.
+- **`TRACE REJECTED`:** the real code did something the model does not allow. Read the listed
+  observations against the code and the model, and fix the one that is wrong.
 - **In CI:** `run --ci` picks the PR's target branch from GitHub Actions, Azure Pipelines or
   GitLab and runs only the checks whose files changed; on a push, or a shallow clone, it runs all.
 
@@ -116,6 +123,8 @@ python verification/verikit.py list                    # what exists, what is st
       `# verikit:roots` list includes this root.
 - [ ] A test filter that selects nothing cannot pass: you saw the check FAIL with its variant,
       and the run output names the verification test (MSTest filters on `TestCategory=`).
+- [ ] `covers` is as narrow as the promise (files, or `file#Function`), not a whole busy folder.
+- [ ] Broken variants in product code are find-and-replace `edits` where one place changes.
 - [ ] `bounds` and `assumes` filled in honestly.
 - [ ] `verikit sync <id>` run, and `verification/sync/<id>.json` committed with the check.
 - [ ] Hand-off states: tool and why, bounds, result, variants caught, rerun command, what it leaves out.
@@ -128,7 +137,7 @@ python verification/verikit.py list                    # what exists, what is st
 |---|---|---|
 | 1. First promise | One check with variants, run by hand | Add the CI workflow; add CODEOWNERS on `verification/` |
 | 2. In the pipeline | CI runs `run --changed` on PRs, JUnit in the test tab | Add the Stop hook for agents; cover the top 3 promises from PLAN.md |
-| 3. Both levels | Top promises have a design model AND code checks on each side | Schedule `/verify-maintain` (e.g. nightly) to catch drift; add mutation testing (Stryker.NET / StrykerJS) beside it |
+| 3. All three kinds | Top promises have a design model, code checks on each side, and a conformance check (`verikit trace`) tying them together | Schedule `/verify-maintain` (e.g. nightly) to catch drift; add mutation testing (Stryker.NET / StrykerJS) beside it |
 | 4. Routine | New risky features get a promise in the same PR | Proofs (Lean/Dafny) for the core logic that must hold at every size; track counterexamples found as a metric |
 
 ### For an agent improving the kit itself

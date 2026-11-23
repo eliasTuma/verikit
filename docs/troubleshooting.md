@@ -10,6 +10,12 @@
 | `must fail: ... not with the expected message` | The variant crashed, or the failure message changed | Make the failure message state the rule; check `match` |
 | `patch ... does not apply` | The code moved since the patch was written | Regenerate it with `git diff --relative` from the folder holding `verification/` |
 | `patch ... applied but changed no file` | Patch paths are relative to the git top level, not the verification root | Regenerate it from the verification root |
+| `edit of X: the find text was not found` / `found N times` | The guard's text changed, or it is not unique | Update `find` to the guard's current text; add a little surrounding text until it matches exactly once |
+| `changed: file#Name (anchor not found): renamed or moved?` | The function a check covers was renamed, moved or deleted | Find where the promise's code lives now, re-read it against the model, fix the cover, then `sync` |
+| `[TRACE REJECTED]` | The real code reached a state the model does not allow | Read the listed observations against the code and the model. Either the code has a bug or the model is out of date; fix the one that is wrong |
+| `the recording command failed ... so no trace was checked` | The recorder test itself failed | Fix the recorder; it should record, not assert the rule |
+| `[isolation] link: X is not a folder` | `run --isolated` links git-ignored dependency folders into the copy, and this one is not installed | Install dependencies in the working tree first (`npm ci`), or remove it from `link` and give `[isolation] setup` |
+| `left ...verikit-iso-... in place: it still contains a link` | A link in the throwaway copy could not be removed, so verikit refused to delete the tree | Remove that link by hand (`rmdir` on Windows, `unlink` elsewhere), then the folder |
 | `reverted broken-variant patch ... left applied` | A previous run was interrupted | Nothing to do; verikit restored the files. Check `git diff` if unsure. |
 | `[error] ... an action contradicts itself` | A TLA+ action sets a variable it also lists as UNCHANGED | Fix the action; the pass was vacuous |
 | The Stop hook blocks | This session changed covered code and no passing run has seen it, or a passing check's sync record is older than the code | Run the named check, or re-confirm and `sync`. It never blocks twice in a row. |
