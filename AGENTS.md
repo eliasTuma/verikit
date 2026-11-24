@@ -52,6 +52,14 @@ A promise that spans frontend and backend usually gets:
 - one **code** check per side, written **inside that side's existing test project**, tagged
   `Verification` (or named `verification: ...`), selected by the manifest's `run`.
 
+**Rules of one flow share one model and one test file; each rule keeps its own manifest
+entry.** Before writing a model, look for one: `list --tag <flow>` and `verification/<flow>/`.
+Adding a rule means one invariant, one witness, one test and one entry per level, then
+`run --tag <flow>` and `sync --tag <flow>`, because the edit makes every check of that flow
+out of date. Never one model per rule, never one model for the whole product. The full layout
+is in `verify-create` (step 3) and in
+[docs/combining-with-tests.md](docs/combining-with-tests.md#many-rules-one-model-and-one-test-file-per-flow).
+
 ## 4. Maintain
 
 Follow `verify-maintain` (`/verify-maintain`). Start with `python verification/verikit.py stale`.
@@ -66,6 +74,7 @@ python verification/verikit.py run <id> --seed <N>     # replay a failure with t
 python verification/verikit.py list                    # what exists, what is stale
 python verification/verikit.py run <id> --isolated     # variants in a throwaway copy: your working files stay untouched
 python verification/verikit.py report                  # every promise and its status, for a human
+python verification/verikit.py run --tag <flow>        # every rule of one flow; then: sync --tag <flow>
 ```
 
 - **A check fails on the current code:** it is a finding until proven otherwise. Replay the
@@ -95,8 +104,9 @@ python verification/verikit.py report                  # every promise and its s
 2. Never edit product logic while creating or maintaining checks, unless the user asks.
    Test files, test scripts, test project references and CI install steps needed to run the
    checks are part of the job; say in the hand-off which ones you changed.
-3. Every check has at least one `must_fail`; every model has a reachability witness; every
-   guard has its own broken variant; every `must_fail` has a `match` that names the rule.
+3. Every check has at least one `must_fail`; every rule checked on a model has its own
+   reachability witness (a model shared by five rules needs five); every guard has its own
+   broken variant; every `must_fail` has a `match` that names the rule.
 4. Never write or edit a sync record (`verification/sync/<id>.json`) by hand. Only
    `verikit sync` writes it, and only after a pass. Commit it with the change it confirms.
 5. A rule is a product decision. Show the rule, the harm and the gaps to the user; changes to
@@ -112,7 +122,10 @@ python verification/verikit.py report                  # every promise and its s
 - [ ] Rule, harm and gaps shown to the user, in plain words.
 - [ ] Model actions / test steps each map to code a reviewer can open (comments name file + function).
 - [ ] `python verification/verikit.py run <id>` shows `[ok] holds` and `[ok] must fail` for **every** variant.
-- [ ] At least one variant per guard, plus a witness for every model.
+- [ ] At least one variant per guard, plus a witness for every rule checked on a model.
+- [ ] If the flow already had a model or test file, the rule was added to it (no second model),
+      the entry carries the flow's tag and the same `rule` sentence at every level, and every
+      check of the flow was rerun and synced (`run --tag <flow>`, `sync --tag <flow>`).
 - [ ] Code checks live in the existing test projects and run in the team's normal test command too
       (check the test script: a file list needs the new file, or use a glob).
 - [ ] The check's own test files are listed in `harness`; the product files it describes in `covers`.
@@ -139,6 +152,10 @@ python verification/verikit.py report                  # every promise and its s
 | 2. In the pipeline | CI runs `run --changed` on PRs, JUnit in the test tab | Add the Stop hook for agents; cover the top 3 promises from PLAN.md |
 | 3. All three kinds | Top promises have a design model, code checks on each side, and a conformance check (`verikit trace`) tying them together | Schedule `/verify-maintain` (e.g. nightly) to catch drift; add mutation testing (Stryker.NET / StrykerJS) beside it |
 | 4. Routine | New risky features get a promise in the same PR | Proofs (Lean/Dafny) for the core logic that must hold at every size; track counterexamples found as a metric |
+
+Growing from a handful of promises to dozens: go flow by flow, one model and one test file per
+flow, one manifest entry per rule. Not yet measured beyond a few rules; see
+[the costs](docs/combining-with-tests.md#many-rules-one-model-and-one-test-file-per-flow).
 
 ### For an agent improving the kit itself
 

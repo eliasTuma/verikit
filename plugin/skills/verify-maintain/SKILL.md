@@ -20,6 +20,9 @@ a rule to make it pass.
    with the files, and prints a `review:` line with the commit to read from. `list` shows rule,
    bounds and assumptions. In a monorepo, each service folder that holds a `verification/`
    is its own root: run the commands from inside it (or pass `--root`).
+   Several rules of one flow can share a model or a test file. A change to that shared file
+   makes all of them stale together: handle them as one group (`stale --tag <flow>`,
+   `run --tag <flow>`, and at the end `sync --tag <flow>`), but judge each rule on its own.
 2. **Run it as it is**, before changing anything: `python verification/verikit.py run <id>`.
    Record the result. A pass only says the old description still holds.
 3. **Read every change to covered code and to the check's harness:**

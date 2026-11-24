@@ -6,7 +6,8 @@ disable-model-invocation: true
 
 # Survey: what is worth verifying here
 
-A large repo has thousands of behaviours and room for perhaps ten verified promises.
+A large repo has thousands of behaviours and room for perhaps ten verified promises in a
+first round, a few dozen once the team is used to them.
 This skill finds the few where a bug costs the most and tests reach the least, and
 writes them down as a plan the user approves before any model or harness is written.
 It reads; it changes nothing except `verification/PLAN.md`.
@@ -43,6 +44,12 @@ Write each one as a single sentence a product owner would agree with. Look harde
 For each candidate, find the code that makes the promise, and check whether existing
 tests ever reach the case that breaks it. Tests that only walk the happy path do not count.
 
+Name the **flow** each candidate belongs to (checkout, refunds, sign-up, job leasing). Rules of
+one flow will share one model and one test file, so the second rule of a flow costs much less
+than the first. For each flow, also look for the rules that only appear when its steps are taken
+together: what must be true if the service stops between two steps, or if a later step fails
+after an earlier one succeeded (stock reserved, charge declined).
+
 ## 3. Score and rank
 
 For each candidate record: **harm** (who is hurt, how badly, how visibly), **likelihood**
@@ -68,14 +75,22 @@ backend system want two checks:
 ```markdown
 # Verification plan - <repo>, <date>
 
-| # | Promise (one sentence) | Harm | Why tests miss it | Checks (level: tool, where) | Covers | Est. effort |
-|---|---|---|---|---|---|---|
-| 1 | A customer is never charged twice for one purchase. | ... | retry on timeout; no test lets both calls land | design: TLA+; code: FsCheck in Payments.Tests; code: fast-check in web/checkout | src/Payments/**, web/src/app/checkout/** | S |
+| # | Flow | Promise (one sentence) | Harm | Why tests miss it | Checks (level: tool, where) | Covers | Est. effort |
+|---|---|---|---|---|---|---|---|
+| 1 | checkout | A customer is never charged twice for one purchase. | ... | retry on timeout; no test lets both calls land | design: TLA+; code: FsCheck in Payments.Tests; code: fast-check in web/checkout | src/Payments/**, web/src/app/checkout/** | M (first rule of the flow: new model) |
+| 2 | checkout | Stock never goes below zero. | ... | two buyers, one item; tests run one buyer | design: same model; code: same test file | src/Checkout/StockService.cs#Reserve | S (added to the checkout model) |
 
+## Later rounds (by flow)
 ## Not chosen, and why
 ## Open questions for the owner
 ```
 
-Keep it to the top 3-10. Then stop and ask the user to approve, reorder or cut the list.
-Do not start `/verify-create` until they have. When they approve, run `/verify-create`
+Keep the first round to the top 3-10, and prefer rules of one or two flows, so they share a
+model. If the user wants broad coverage (dozens of rules), list the rest under "Later rounds",
+grouped by flow, and say that each round is one flow: its model, its test file, then its rules
+one at a time. Do not plan one model per rule, and do not plan one model for the whole product.
+
+Then stop and ask the user to approve, reorder or cut the list. A missing rule is the one
+mistake no check can find, so ask them directly what is missing.
+Do not start `/verify-create` until they have approved. When they do, run `/verify-create`
 on the first promise, one promise at a time.

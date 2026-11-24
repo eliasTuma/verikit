@@ -60,6 +60,27 @@ For a promise that spans frontend and backend, write ONE design model of the who
 that owns part of the promise. The model can drift from the code; the code checks cannot,
 but they only sample. Together they cover each other's blind spot.
 
+**Does this flow already have a model or a test file? Then add to it; do not start a second
+one.** Look in the manifest for checks with the flow's tag (`list --tag checkout`) and in
+`verification/<flow>/`. Rules about the same flow share one model and one test file, and each
+rule still gets its own manifest entry:
+
+- Model: add one named invariant for the rule and one witness for it. Add actions only when
+  the rule needs behaviour the model lacks (a failure, a crash, a retry). List the invariant in
+  the `.cfg` as well.
+- Code: add one named test to the flow's test file, reusing its fakes and generators.
+- Manifest: a new `[[check]]` per level with `id = "<flow>-<rule>-<level>"`, the flow's name in
+  `tags`, and a `run` that selects only this rule: `--inv TypeOK --inv <Rule>` for the model
+  (`--inv` replaces the `.cfg` list), the runner's test-name filter for code. Use the same
+  `rule` sentence, word for word, in every entry of one rule: the report groups by it.
+- Your edit makes every check of the flow out of date, because they share the model (and the
+  test file in `harness`). That is intended: rerun and record them all with
+  `python verification/verikit.py run --tag <flow>`, then `sync --tag <flow>`. A new action
+  can break an older rule; that is a finding, not a reason to remove the action.
+- If the flow has a conformance check, update its trace recorder for new variables or actions.
+- A rule that depends on two flows changing the same data gets its own small model: the shared
+  state and only the actions of each flow that touch it. Never merge two flow models.
+
 ## 4. Build the checks so they are true to the code
 
 **Models (TLA+), in `verification/<area>/`:**
@@ -132,8 +153,13 @@ A check that you have never seen fail proves nothing. Add `[[check.must_fail]]` 
   check or ordering whose removal could break THIS rule. Code that only affects whether
   things eventually finish (a `finally` that releases a lock) is not a guard for a safety
   rule like "at most once"; list it under the gaps instead.
-- **One reachability witness per model:** `--inv NeverCharged` where `NeverCharged`
-  says the good thing never happens. It must FAIL; otherwise the rule may pass vacuously.
+- **One reachability witness per rule checked on a model:** `--inv NeverCharged` where
+  `NeverCharged` says the situation the rule talks about never happens. It must FAIL; otherwise
+  the rule may pass vacuously. A model shared by several rules needs one for each: "if the
+  charge fails, the item goes back to stock" proves nothing in a model where no charge fails.
+- **In a model with several rules, every `must_fail` line names its own rule** with `--inv`.
+  With all invariants on, TLC stops at the first rule that breaks, which can be another one,
+  and `match` misses.
 - **Every `must_fail` has a `match`** regex naming the broken rule. Write regexes as TOML
   literal strings in single quotes: `match = 'VIOLATION\] NeverChargedTwice'`.
 

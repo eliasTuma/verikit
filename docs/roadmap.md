@@ -26,7 +26,12 @@ checking against the model, a database-backed example on PostgreSQL.
    model action was seen in some trace (the code can do what the model says it can).
 5. **Maintenance as a scheduled agent:** a CI job that runs `/verify-maintain` on stale checks
    and opens a pull request with its triage, so drift is handled without a person starting it.
-6. **Split manifests** (`include = ["checks/*.toml"]`) for areas owned by different teams.
+6. **Dozens of rules.** The layout is documented (one model and one test file per flow, one
+   entry per rule) and its mechanics are unit-tested, but nothing has run with more than a few
+   rules. Open parts: **one run shared by several rules** (today a database container or a
+   legacy build is paid once per rule and variant), and **split manifests**
+   (`include = ["checks/*.toml"]`) for flows owned by different teams. Done when a repository
+   with 25 rules has measured run times for a pull request and for the nightly run.
 7. **More .NET wiring:** NUnit (filter property, adapter), Coyote on `net48` wired into MSBuild
    (rewritten by hand once), a pinned Coyote build for net10 once one is released.
 8. **More Angular wiring through `verikit run`:** the older `@angular-devkit/build-angular:karma`

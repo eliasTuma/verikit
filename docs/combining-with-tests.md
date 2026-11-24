@@ -88,6 +88,92 @@ harness = ["web:src/app/checkout/pay.verification.spec.ts"]
   repositories:` entry and a second `checkout:` step; with more than one checkout step Azure puts
   `self` under `$(Build.SourcesDirectory)/<repo name>`, so adjust the template's `workingDirectory`.
 
+## Many rules: one model and one test file per flow
+
+A product with 25 to 50 rules does not need 50 models. Rules about the same flow (checkout,
+refunds, sign-up) describe the same steps, so they share **one model and one test file per
+flow**. The manifest still has **one entry per rule**, so every rule keeps its own row in the
+report, its own broken variants and its own sync record.
+
+| Piece | How many | What it holds |
+|---|---|---|
+| `verification/checkout/Checkout.tla` + `.cfg` | one per flow | the flow's steps, including failures, crashes and retries; one named invariant per rule; one witness per rule |
+| a test file in the existing test project | one per flow and side | shared fakes, generators and scheduling; one named test per rule |
+| `[[check]]` in the manifest | one per rule and level | `id = "checkout-<rule>-<level>"`, `tags = ["checkout"]`, that rule's invariant or test |
+
+```toml
+[[check]]
+id = "checkout-no-oversell-design"
+rule = "Stock never goes below zero."
+level = "design"
+tags = ["checkout"]
+run = "{verikit} tlc verification/checkout/Checkout.tla --inv TypeOK --inv NoOversell"
+covers = ["src/Checkout/StockService.cs#Reserve"]
+
+  [[check.must_fail]]
+  why = "Broken variant: the stock update does not check the quantity"
+  run = "{verikit} tlc verification/checkout/Checkout.tla --const CheckQuantity=FALSE --inv NoOversell"
+  match = 'VIOLATION\] NoOversell'
+
+  [[check.must_fail]]
+  why = "Witness: the model can sell the last item"
+  run = "{verikit} tlc verification/checkout/Checkout.tla --inv NeverSoldOut"
+  match = 'VIOLATION\] NeverSoldOut\b'
+```
+
+What makes this layout work:
+
+- **`--inv` replaces the invariant list of the `.cfg`.** Name `TypeOK` and the rule's own
+  invariant on each `run` line. Keep every rule in the `.cfg` too, so
+  `verikit tlc Checkout.tla` on its own checks the whole flow.
+- **A broken variant names only its own rule.** With every invariant on, TLC stops at the first
+  rule that breaks, which can be a different one, and `match` misses.
+- **One witness per rule, not per model.** "If the charge fails, the item goes back to stock"
+  passes vacuously in a model where a charge never fails. The witness says the situation the
+  rule talks about never happens (`NeverFailedCharge`), and it must FAIL.
+- **The same `rule` sentence, word for word**, in a rule's design, code and conformance
+  entries. The report groups by that text; a wording difference splits one promise into two.
+- **Code checks pick their test by name** with the runner's own filter. A filter that selects
+  nothing passes, so watch each one fail with its broken variant.
+- **`covers` stays per rule**: the function that keeps that rule, not the whole flow.
+
+**Adding a rule to a flow that already has checks:**
+
+1. Add the invariant and its witness to the flow's model, and a test to the flow's test file.
+   Add actions to the model only when the rule needs behaviour the model lacks (a failure, a
+   crash, a retry).
+2. Add the manifest entries with the flow's tag.
+3. The edit makes **every check of that flow out of date**: design and conformance checks share
+   the model, code checks share the test file listed in `harness`. That is intended. It is how
+   a new rule gets checked together with the ones already there, and a new action can break an
+   older rule. Run them all and record the result:
+   ```sh
+   python verification/verikit.py run --tag checkout
+   python verification/verikit.py sync --tag checkout      # reruns, then records; commit verification/sync/
+   ```
+   A rule that fails now is a finding, not a reason to take the new action out.
+4. If the flow has a conformance check, new variables or actions need the trace recorder
+   updated as well, or the model will reject the old recordings.
+
+**A rule that spans two flows** (checkout and refunds both change stock) gets its own small
+model: the shared state and only the actions of each flow that touch it. Do not merge the two
+flow models; the number of orderings multiplies and TLC stops finishing. Tag it with both flows.
+
+**What it costs.** Runs grow with the number of rules, not flows: each rule runs once, plus once
+per broken variant.
+
+- On the small checkout model, one TLC run takes about 3 seconds through Docker (one Windows
+  laptop, one measurement). Larger models take longer; if one run takes minutes, lower the
+  bounds or split the flow.
+- Code checks with expensive setup (a database container, a legacy .NET build) pay it once
+  per rule and variant. There is no way yet to share one run between rules
+  ([roadmap](roadmap.md)).
+- Pull requests run only the checks whose files changed (`run --ci`); the nightly run does all
+  of them. `run --isolated --jobs N` runs the variants of several checks side by side.
+
+Not measured: a repository with 25 or more rules. Start with one flow and 3 to 5 rules, look at
+the run time and at how often checks go out of date, then add the next flow.
+
 ## Keeping it quiet and fast on a large repository
 
 - **Narrow covers.** A check that covers `src/Payments/**` is stale after every edit there, and

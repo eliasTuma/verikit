@@ -15,7 +15,7 @@ tests inside your own test projects), with proof that every check can actually f
 It is a small Python runner (stdlib only), three agent skills (also installable as a Claude
 Code plugin), eight runnable examples for .NET (including legacy .NET Framework and Coyote),
 Node (including a real PostgreSQL race), React and Angular, and CI templates for GitHub Actions
-and Azure Pipelines. Version **0.4.0**; see [what has been tested](#supported-stacks).
+and Azure Pipelines. Version **0.4.1**; see [what has been tested](#supported-stacks).
 
 **Where it stands:** every example runs in CI on Linux and Windows, but all of them are small
 programs written for the kit. It has not yet been used on a large production codebase; treat
@@ -36,6 +36,12 @@ your first promise on real code as a pilot.
 
 Not for: replacing your unit or end-to-end tests, verifying every function, UI layout, or
 performance. Keep your tests; this is for the promises they cannot reach.
+
+**More than ten rules?** Group them by flow: rules about the same flow share one model and one
+test file, and each rule keeps its own entry, broken variants and row in the report. Adding a
+rule to a flow sends every rule of that flow back for a rerun. See
+[many rules](docs/combining-with-tests.md#many-rules-one-model-and-one-test-file-per-flow);
+this has been run with a few rules, not yet with dozens.
 
 ## How it works
 
@@ -153,7 +159,7 @@ machine has the tools for.
 | `init [--hook] [--ci github,azure\|both] [--no-skills] [--force]` | Scaffolds `verification/` in the current folder (monorepo-aware); in another root, adds that root to the existing CI workflow. | 0 / 2 |
 | `run [ID...] [--tag T] [--changed [REF] \| --ci] [--isolated] [--jobs N] [--seed N] [--junit F] [--json F] [--summary F.md]` | Each check must pass; each `must_fail` must fail with its `match`. `--ci` = in a PR build (GitHub Actions, Azure Pipelines, GitLab) only the checks whose files changed vs the target branch, else all. `--changed REF` = vs `REF...HEAD`; bare `--changed` = vs each sync record. `--isolated` applies broken variants in a throwaway copy of the repo, never in your working files; `--jobs N` runs variants of N checks side by side. `--summary` writes a Markdown summary (with `--ci` also to the GitHub job summary or the Azure run page). The seed is exported as `VERIKIT_SEED`; saved seeds are replayed. | 0 / 1 / 2 |
 | `stale [--strict]` | Checks whose covered content differs from what their last `sync` recorded. Needs no git history: it survives squash merges, rebases and shallow clones. | 0 / 1 |
-| `sync ID...` | Reruns the check, then records the content it confirmed in `verification/sync/<id>.json` (commit it with your change). | 0 / 1 / 2 |
+| `sync [ID...] [--tag T]` | Reruns the checks (all of them, or the ids or tag given), then records the content it confirmed in `verification/sync/<id>.json` (commit it with your change). | 0 / 1 / 2 |
 | `list [--tag T]` | Rule, harm, covers, bounds, variants, sync state, last local pass. | 0 |
 | `report [--md F] [--html F]` | Every promise with its checks, scope, variants and sync status, for people who do not read CI logs. Runs nothing. A stale or unknown check is never shown as green. | 0 |
 | `seed add ID SEED [--note T]` / `seed list` | Keep the seed of a failing random case in `verification/seeds/<id>.txt`; every later `run` replays it. | 0 / 2 |

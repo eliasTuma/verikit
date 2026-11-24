@@ -15,7 +15,8 @@ broken variants that MUST fail, and a record of the content it was last confirme
           [--tag T] [--changed [REF] | --ci] [--isolated] [--jobs N] [--seed N]
           [--junit FILE] [--json FILE] [--summary FILE.md]
     python verikit.py stale [--strict]       checks whose covered content changed since their last sync
-    python verikit.py sync ID ...            re-run, then record that content in verification/sync/
+    python verikit.py sync [ID ...] [--tag T]
+                                             re-run, then record that content in verification/sync/
     python verikit.py seed add ID SEED       keep a failing case; `run` replays saved seeds
     python verikit.py tlc SPEC.tla [-c CFG] [--const K=V] [--inv NAME]
                                              TLA+ model checker (local Java, else Docker)
@@ -53,7 +54,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 TLA_VERSION = "1.7.4"
 TLA_URL = f"https://github.com/tlaplus/tlaplus/releases/download/v{TLA_VERSION}/tla2tools.jar"
 TLA_SHA256 = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"  # official v1.7.4 asset
@@ -1450,7 +1451,10 @@ def cmd_sync(args) -> int:
     root = find_root(args.root)
     recover_pending(root)
     m = load_manifest(root)
-    for c in select(m["check"], args.ids):
+    chosen = select(m["check"], args.ids, args.tag)
+    if not chosen:
+        die("no checks match, so nothing was synced")
+    for c in chosen:
         for name in source_globs(c):
             if source_dir(root, c, name) is None:
                 die(f"{c['id']}: it covers files in {name!r}, but there is no git checkout at "
@@ -2626,6 +2630,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("sync", parents=[common], help="re-run checks, then record the content they confirmed (verification/sync/)")
     p.add_argument("ids", nargs="*", help="check ids (default: every check)")
+    p.add_argument("--tag", action="append", default=[],
+                   help="only checks with this tag (repeatable), e.g. every rule of one flow")
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--seed", type=int)
     p.set_defaults(fn=cmd_sync)

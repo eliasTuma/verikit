@@ -392,6 +392,94 @@ class StaleChangedHook(unittest.TestCase):
         self.assertIn("changed: verification/break.patch", out)
 
 
+FLOW = """
+    version = 1
+    [[check]]
+    id = "checkout-charged-once"
+    rule = "A customer is never charged twice."
+    tags = ["checkout"]
+    run = "{python} check.py verification/checkout/model.txt ChargedOnce"
+    covers = ["src/app.txt"]
+      [[check.must_fail]]
+      why = "guard removed"
+      edits = [{ file = "src/app.txt", find = "guard = on", replace = "guard = BROKEN" }]
+      match = 'RULE BROKEN'
+    [[check]]
+    id = "checkout-no-oversell"
+    rule = "Stock never goes below zero."
+    tags = ["checkout"]
+    run = "{python} check.py verification/checkout/model.txt NoOversell"
+    covers = ["src/app.txt"]
+      [[check.must_fail]]
+      why = "guard removed"
+      edits = [{ file = "src/app.txt", find = "guard = on", replace = "guard = BROKEN" }]
+      match = 'RULE BROKEN'
+    [[check]]
+    id = "refund-limit"
+    rule = "A refund never exceeds the charge."
+    tags = ["refund"]
+    run = "{python} check.py verification/refund/model.txt"
+    covers = ["src/app.txt"]
+      [[check.must_fail]]
+      why = "guard removed"
+      edits = [{ file = "src/app.txt", find = "guard = on", replace = "guard = BROKEN" }]
+      match = 'RULE BROKEN'
+"""
+
+
+class RulesOfOneFlowShareAModel(unittest.TestCase):
+    """docs/combining-with-tests.md, "Many rules": one model per flow, one manifest entry per
+    rule. A change to the shared model must send every rule of that flow back for a rerun."""
+
+    def setUp(self):
+        self.r = Repo(FLOW)
+        for flow in ("checkout", "refund"):
+            (self.r.root / "verification" / flow).mkdir()
+            (self.r.root / "verification" / flow / "model.txt").write_text("steps\n", encoding="utf-8")
+        self.r.commit("models")
+        code, out = vk("sync", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.r.commit("sync")
+
+    def tearDown(self):
+        self.r.close()
+
+    def test_editing_the_shared_model_makes_every_rule_of_the_flow_stale_and_no_other(self):
+        self.assertEqual(vk("stale", "--root", str(self.r.root), "--strict")[0], 0)
+        model = self.r.root / "verification" / "checkout" / "model.txt"
+        model.write_text("steps\nNewRule\n", encoding="utf-8")       # a rule is added to the flow
+        self.r.commit("add a rule to the checkout model")
+        code, out = vk("stale", "--root", str(self.r.root), "--strict")
+        self.assertEqual(code, 1, out)
+        self.assertRegex(out, r"stale\s+checkout-charged-once")
+        self.assertRegex(out, r"stale\s+checkout-no-oversell")
+        self.assertRegex(out, r"synced\s+refund-limit")
+        code, out = vk("run", "--root", str(self.r.root), "--changed")
+        self.assertIn("== checkout-charged-once", out)
+        self.assertIn("== checkout-no-oversell", out)
+        self.assertNotIn("== refund-limit", out)
+
+    def test_sync_by_tag_confirms_the_whole_flow_and_nothing_else(self):
+        (self.r.root / "verification" / "checkout" / "model.txt").write_text("steps\nNewRule\n", encoding="utf-8")
+        (self.r.root / "verification" / "refund" / "model.txt").write_text("steps\nOther\n", encoding="utf-8")
+        code, out = vk("sync", "--tag", "checkout", "--root", str(self.r.root))
+        self.assertEqual(code, 0, out)
+        self.assertIn("synced checkout-charged-once", out)
+        self.assertIn("synced checkout-no-oversell", out)
+        self.assertNotIn("refund-limit", out)
+        out = vk("stale", "--root", str(self.r.root))[1]
+        self.assertRegex(out, r"synced\s+checkout-no-oversell")
+        self.assertRegex(out, r"stale\s+refund-limit")
+        code, out = vk("sync", "--tag", "nope", "--root", str(self.r.root))
+        self.assertEqual(code, 2, out)                                # never a silent "nothing synced"
+
+    def test_report_keeps_one_row_per_rule(self):
+        out = vk("report", "--root", str(self.r.root))[1]
+        self.assertIn("3 promise(s), 3 check(s)", out)
+        for rule in ("never charged twice", "Stock never goes below zero", "refund never exceeds"):
+            self.assertIn(rule, out)
+
+
 def hook(cwd: Path, event: str = "Stop", session: str = "s1", **extra) -> str | None:
     """Run the Claude Code hook; return the block reason (Stop) or the context text
     (SessionStart), or None when it says nothing."""

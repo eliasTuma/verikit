@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1 - 2026-11-24
+
+Guidance for products with many rules. Until now nothing told an agent how to go from a
+handful of promises to dozens, so it would have written one model per rule.
+
+- **One model and one test file per flow, one manifest entry per rule.** Layout, the steps for
+  adding a rule to a flow, rules that span two flows, and the costs are in
+  docs/combining-with-tests.md ("Many rules"). The `verify-create`, `verify-survey` and
+  `verify-maintain` skills and AGENTS.md carry the procedure, because a target repository gets
+  the skills but not the kit's docs. PLAN.md gains a Flow column and a "Later rounds" section.
+- **A witness per rule**, not per model: a rule about a failed charge passes vacuously in a
+  model where no charge fails. Hard rule 3 and the done checklist say so now.
+- **`sync --tag <flow>`** re-confirms every rule of a flow in one command. A tag that matches
+  nothing is an error, not a silent success.
+- Unit tests pin what the layout relies on: an edit to a shared model makes every rule of that
+  flow stale and no rule of another flow; the report keeps one row per rule.
+
+Checked by hand on a copy of `examples/node-checkout` with two rules on one model. Not run
+with dozens of rules; the roadmap says what is open.
+
+Upgrading from 0.4.0: re-run `init --hook --force` to replace the installed skills.
+
 ## 0.4.0 - 2026-11-24
 
 Aimed at what makes a team stop using a tool like this in its first month: noise, brittle
