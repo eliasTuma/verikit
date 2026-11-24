@@ -26,8 +26,9 @@ call was slow, not dead; it lands, the retry lands, and the customer is charged 
      step preserves it, so it holds on every path. Rarely the first step.
 3. **A check you have never seen fail proves nothing.** For every guard the code relies on, a
    broken variant (a patch removing it, or a model constant disabling it) must make the check
-   fail. Every model also needs a **witness**: an invariant claiming the good thing never
-   happens, which must fail. Without it, a model where nothing can happen passes every rule.
+   fail. Every rule checked on a model also needs a **witness**: an invariant claiming the
+   situation the rule talks about never happens, which must fail. Without it, a model where
+   nothing can happen passes every rule. A model shared by several rules needs one per rule.
 4. **Findings stay findings.** When the current code breaks the rule, report the counterexample
    in the code's words. Do not weaken the rule or the model until it passes.
 5. **Keep the check in step with the code.** Each check records the files it describes and the

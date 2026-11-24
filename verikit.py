@@ -1452,8 +1452,8 @@ def cmd_sync(args) -> int:
     recover_pending(root)
     m = load_manifest(root)
     chosen = select(m["check"], args.ids, args.tag)
-    if not chosen:
-        die("no checks match, so nothing was synced")
+    if args.tag and not chosen:
+        die(f"no check has the tag {', '.join(args.tag)}, so nothing was synced")
     for c in chosen:
         for name in source_globs(c):
             if source_dir(root, c, name) is None:
